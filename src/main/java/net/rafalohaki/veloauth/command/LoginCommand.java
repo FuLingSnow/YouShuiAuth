@@ -3,6 +3,7 @@ package net.rafalohaki.veloauth.command;
 import at.favre.lib.crypto.bcrypt.BCrypt;
 import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.proxy.Player;
+import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.rafalohaki.veloauth.audit.AuditEventType;
@@ -82,11 +83,12 @@ class LoginCommand implements SimpleCommand {
             player.sendMessage(ctx.messages().component("qq.login.code_wait", NamedTextColor.YELLOW));
             return;
         }
-        player.sendMessage(ctx.messages().component(
+        Component hint = ctx.messages().component(
                 "qq.login.code_hint", NamedTextColor.AQUA,
-                code.get(), service.getLoginCodeTtlSeconds()));
-        player.sendMessage(ctx.messages().component("qq.login.copy", NamedTextColor.AQUA)
-                .clickEvent(ClickEvent.copyToClipboard("/登录 " + code.get())));
+                code.get(), service.getLoginCodeTtlSeconds());
+        Component copy = ctx.messages().component("qq.login.copy", NamedTextColor.AQUA)
+                .clickEvent(ClickEvent.copyToClipboard("/登录 " + code.get()));
+        player.sendMessage(hint.append(Component.space()).append(copy));
     }
 
     private void processLogin(

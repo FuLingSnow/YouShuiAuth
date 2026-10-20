@@ -56,19 +56,31 @@ class QqBindCommand implements SimpleCommand {
     private void sendCode(Player player, QqAuthService.BindCodeIssue issue) {
         int minutes = Math.max(1, issue.ttlSeconds() / 60);
         String key = issue.createsAccount() ? "qq.bind.register_created" : "qq.bind.created";
-        player.sendMessage(messages.component(
-                key, NamedTextColor.GREEN, issue.code(), minutes));
+        Component created = messages.component(key, NamedTextColor.GREEN, issue.code(), minutes);
 
         // The AstrBot command is the Chinese "/绑定"; copy exactly what the player must send.
         String copyCommand = "/绑定 " + issue.code();
-        if (!issue.createsAccount()) {
-            Component manual = messages.component(
-                    "qq.bind.manual", NamedTextColor.YELLOW, issue.code());
-            player.sendMessage(manual.clickEvent(ClickEvent.copyToClipboard(copyCommand)));
-        }
-
         Component copy = messages.component("qq.bind.copy", NamedTextColor.AQUA)
                 .clickEvent(ClickEvent.copyToClipboard(copyCommand));
-        player.sendMessage(copy);
+
+        if (issue.createsAccount()) {
+            player.sendMessage(created.append(Component.space()).append(withJoinGroup(copy)));
+            return;
+        }
+
+        player.sendMessage(created);
+        Component manual = messages.component("qq.bind.manual", NamedTextColor.YELLOW, issue.code())
+                .clickEvent(ClickEvent.copyToClipboard(copyCommand));
+        player.sendMessage(manual.append(Component.space()).append(withJoinGroup(copy)));
+    }
+
+    private Component withJoinGroup(Component copy) {
+        String joinUrl = service.getJoinUrl();
+        if (joinUrl.isBlank()) {
+            return copy;
+        }
+        return copy.append(Component.space()).append(
+                messages.component("qq.bind.join_group", NamedTextColor.GOLD)
+                        .clickEvent(ClickEvent.openUrl(joinUrl)));
     }
 }

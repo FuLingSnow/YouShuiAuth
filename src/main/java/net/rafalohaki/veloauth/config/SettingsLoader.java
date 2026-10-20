@@ -484,7 +484,8 @@ final class SettingsLoader {
                 YamlParserUtils.getInt(
                         qq, "login-code-ttl-seconds", target.getLoginCodeTtlSeconds()),
                 YamlParserUtils.getInt(
-                        qq, "max-attempts-per-minute", target.getMaxAttemptsPerMinute()));
+                        qq, "max-attempts-per-minute", target.getMaxAttemptsPerMinute()),
+                YamlParserUtils.getString(qq, "join-url", target.getJoinUrl()));
     }
 
     /**

@@ -367,6 +367,9 @@ qq:
   shared-secret: ""
   # 允许绑定账号或确认登录的 QQ 群号。留空则拒绝所有群。
   allowed-groups: []
+  # QQ 群邀请链接。/qqbind 生成绑定码时附带可点击的入群按钮；留空则不显示。
+  # 例：https://qm.qq.com/q/xxxxxxxx
+  join-url: ""
   # /qqbind 绑定码有效期（60-3600 秒）。
   bind-code-ttl-seconds: 300
   # 大厅快捷登录码有效期（30-600 秒）。应低于

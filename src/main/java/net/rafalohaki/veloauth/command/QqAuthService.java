@@ -104,6 +104,10 @@ public class QqAuthService implements QqAuthBridge {
         return qqSettings.isEnabled() && ctx.databaseManager().getQqDao() != null;
     }
 
+    public String getJoinUrl() {
+        return qqSettings.getJoinUrl();
+    }
+
     public int getLoginCodeTtlSeconds() {
         return qqSettings.getLoginCodeTtlSeconds();
     }
