@@ -1,0 +1,397 @@
+# YouShuiAuth 配置文件
+# 完整的 Velocity 代理认证插件
+#
+# 已存在的 config.yml 在启动和重载时永远不会被覆盖重写。
+# 缺失的可选配置项将使用向后兼容的默认值。仅当需要改变对应行为时，
+# 才从当前 README 中复制新配置段。
+
+# 语言配置（内置语言列表如下；支持自定义语言）
+language: en
+# 根据玩家客户端语言自动检测语言。
+# 为 true 时，存在对应翻译的情况下玩家将看到其客户端语言的提示；
+# 不支持或缺失的翻译会回退到上方的 language，再回退到英文。
+detect-client-language: true
+# 可用内置语言代码："en", "pl", "si", "ru", "tr", "fr", "de", "fi", "nl", "es", "it", "cs", "ro", "sk", "zh_cn", "zh_hk", "ja", "hi", "vi", "ko", "th", "id", "pt_br"
+# 示例：en=英语, pl=波兰语, nl=荷兰语, es=西班牙语, it=意大利语, cs=捷克语, ro=罗马尼亚语, sk=斯洛伐克语, zh_cn=简体中文, zh_hk=繁体中文（香港）, ja=日语, ko=韩语, th=泰语, id=印尼语, pt_br=巴西葡萄牙语
+# 添加自定义语言：在插件数据目录的 lang/ 下创建 messages_XX.properties
+
+# 调试设置
+# 开发/调试时设置为 true
+debug-enabled: false
+
+# 数据库存储配置
+# 支持：H2, MYSQL, POSTGRESQL, SQLITE
+database:
+  # 存储类型（例如 H2, MYSQL, POSTGRESQL, SQLITE）
+  storage-type: H2
+  # 数据库主机（例如 db.example.com）
+  hostname: localhost
+  # 默认端口：MYSQL=3306, POSTGRESQL=5432
+  port: 3306
+  # 数据库/模式名称
+  database: veloauth
+  # 数据库用户
+  user: veloauth
+  # 数据库密码（建议使用强密码）
+  password: ""
+  # 最大连接池数
+  connection-pool-size: 20
+  # 连接最大生命周期（毫秒）（30 分钟）
+  max-lifetime-millis: 1800000
+  # 可选：完整数据库连接 URL
+  # 设置后将优先于上方的独立参数
+  # 示例：
+  #   postgresql://user:pass@host:5432/database
+  #   mysql://user:pass@host:3306/database
+  connection-url: ""
+  # 可选：额外连接参数
+  # connection-url 中的查询参数会被忽略，请填写在此处。
+  # PostgreSQL 的 SSL 选项请优先使用下方 database.postgresql.* 设置。
+  # 示例："?autoReconnect=true&initialTimeout=1&serverTimezone=UTC"
+  connection-parameters: ""
+  # MySQL 在未设置任何 SSL 选项时默认 sslMode=VERIFY_IDENTITY。
+  # 服务器证书必须被 JVM 信任且与所配置的主机名匹配；
+  # connection-parameters 中显式指定的 sslMode/useSSL 选项会被尊重。
+
+  # PostgreSQL 特定配置（storage-type 为 POSTGRESQL 时使用）
+  postgresql:
+    # 启用到 PostgreSQL 的 SSL 连接（托管数据库推荐开启）
+    ssl-enabled: true
+    # SSL 模式：disable, allow, prefer, require, verify-ca, verify-full
+    ssl-mode: "require"
+    # SSL 证书文件路径（可选）
+    ssl-cert: ""
+    # SSL 密钥文件路径（可选）
+    ssl-key: ""
+    # SSL 根证书文件路径（可选）
+    ssl-root-cert: ""
+    # 密钥文件的 SSL 密码（可选）
+    ssl-password: ""
+
+# 认证缓存配置
+cache:
+  # 缓存条目生存时间（分钟）
+  ttl-minutes: 60
+  # 最大缓存条目数
+  max-size: 10000
+  # 清理调度器间隔（分钟）
+  cleanup-interval-minutes: 5
+  # 会话不活动超时（分钟）
+  session-timeout-minutes: 60
+  # 正版状态缓存 TTL（小时）
+  premium-ttl-hours: 24
+  # 后台刷新阈值（0.0-1.0）
+  premium-refresh-threshold: 0.8
+
+# 认证服务器（未认证玩家的 limbo/大厅）
+# 兼容：NanoLimbo, LOOHP/Limbo, LimboService, PicoLimbo, hpfxd/Limbo
+auth-server:
+  # 在内嵌 limbo 完成生产环境灰度验证前，external（外部）始终是默认模式。
+  # 完成预发布验证后才会显式切换为 embedded。更改模式必须完整重启代理。
+  mode: external
+  # 仅外部模式有效：必须匹配 velocity.toml [servers] 中的服务器名称。
+  # 内嵌模式下此值被忽略；不要自行注册保留名 veloauth-embedded-limbo。
+  server-name: limbo
+  # 未认证玩家在认证服务器上被踢出的秒数。
+  # 设为 0（或任何 ≤0 的值）可禁用踢出——玩家可无限期停留在认证/大厅服务器。
+  timeout-seconds: 300
+  embedded:
+    # 由发布锁定、经维护者审核的 ViaVersion 运行时，支持 Java 1.8 至 26.2。
+    # 远程运行时暂存默认关闭。开启后仅允许与内置 URL 和 SHA-256 完全一致的
+    # 候选；可变的 latest 元数据与同源校验和永远不被信任。
+    # 已暂存的候选在下次完整重启后才会生效。关闭该选项不会回滚已成功激活的候选。
+    # 外部模式不执行任何托管运行时检查、下载或类加载。
+    reviewed-runtime-updates: false
+    #
+    # 监听器始终只绑定回环地址。0（推荐）自动选择空闲端口；
+    # 固定端口同样仅限回环，不得暴露到公网。
+    # 在 Velocity modern forwarding 下，Java 1.13+ 会收到标准的
+    # velocity:player_info 查询。Velocity 使用其自身的转发密钥读取并签名；
+    # YouShuiAuth 从不读取、复制或记录该密钥。
+    # modern forwarding 本身无法承载 Java 1.8-1.12 客户端。
+    port: 0
+    # 未认证等待通道的硬性上限。这是安全上限而非认证的承载能力：
+    # 经 Velocity 中转，每个等待玩家约占用 3 个套接字描述符，
+    # 调高默认值前请先压测。
+    max-connections: 512
+    handshake-timeout-seconds: 10
+    login-timeout-seconds: 15
+
+# 连接设置
+connection:
+  # 连接超时（秒）
+  # 应 ≤ Velocity 的 read-timeout（默认 30 秒）
+  timeout-seconds: 30
+  # 转服前可用性检查（认证服务器就绪、forced-host 目标、try-list / 回退后端）的
+  # ping 超时（毫秒）。
+  # 堆大、GC 停顿长的重型 JVM 后端可能无法在默认 3000ms 内响应 ping——
+  # 调高（如 5000）给它们更多时间。过高则会在服务器真正宕机时延迟回退。
+  ping-timeout-ms: 3000
+  # 自动转送后端前，玩家在认证/大厅的最短停留时间。
+  # 该兼容缓冲给模组客户端留出初始化首个世界的时间。
+  # PlayerSettingsChangedEvent 并不代表世界已就绪。
+  # 0 可禁用缓冲；大于 30000 的值会被拒绝。
+  auto-transfer-delay-ms: 1500
+
+# 安全设置（密码哈希与暴力破解防护）
+security:
+  # BCrypt 哈希轮数（10-31）
+  bcrypt-cost: 10
+  # 允许 /register 创建密码账号。为 false 时，新玩家只能使用
+  # QQ 注册（需开启 qq.enabled），已有密码账号仍可用 /login 登录。
+  allow-password-registration: true
+  # /changepassword 总开关。false 时所有账号都被拒绝。
+  # QQ 专用账号本来就会被拒绝；已有密码账号仍可 /login。
+  allow-password-change: true
+  # 跳过 limbo：离线账号若上次登录来自同一设备且在本窗口内，则自动登录。
+  # "设备"由客户端上报特征（brand、协议版本、聊天设置、虚拟主机）加可选的
+  # /24 子网前缀组成指纹。它是便利因子而非强凭据：2FA 账号永不自动登录，
+  # 任何不匹配都会回退到正常登录。除私有/测试服务器外建议保持关闭。
+  auto-login-enabled: false
+  auto-login-max-age-days: 7
+  auto-login-require-same-subnet: true
+  auto-login-fingerprint-required: true
+  # 允许 QQ 专用账号通过 /setpassword 补设密码
+  allow-qq-set-password: false
+  # 禁止已绑定 QQ 的账号使用密码登录（即使已设置密码）
+  deny-qq-password-login: false
+  # 临时封禁前的最大登录失败次数
+  bruteforce-max-attempts: 5
+  # 封禁时长（分钟）
+  bruteforce-timeout-minutes: 5
+  # 每个 IP 最大注册账号数
+  ip-limit-registrations: 3
+  # CONFLICT_MODE（冲突模式）的存续时间（小时）。当正版玩家的昵称与
+  # 已有离线账号冲突时，该账号被标记为冲突模式，并放宽 UUID 校验，
+  # 使真正的所有者仍可连接。超过该 TTL 后，过期的冲突记录将重新要求
+  # 完整 UUID 校验。0 = 不设 TTL（永久冲突，1.3.3 之前的行为）。
+  # 注意：修改后需要重启代理（/vauth reload 不会重读此项）。
+  conflict-mode-ttl-hours: 168
+  # 密码最小长度（含）
+  min-password-length: 8
+  # 密码最大长度（含）（BCrypt 上限：72）
+  max-password-length: 72
+  # 密码复杂度策略（可选，所有计数器默认 0 = 无额外限制）。
+  #
+  # 默认情况下，玩家可以设置任何满足长度限制的密码——对休闲服务器友好，
+  # 严格规则只会惹恼玩家。仅在确实需要时收紧（例如有管理员账户、
+  # 高级经济系统或受监管地区的服务器）。
+  #
+  # 工作原理：
+  #   - 计数器在 min-password-length 之上叠加。
+  #   - 每个计数器 = 密码中该字符类别的最少出现次数。
+  #   - "特殊字符" = 非字母或数字的任何字符（标点、空格、Unicode）。
+  #   - 将任何值设为 0 可禁用该项检查。
+  #
+  # 示例（取消注释一行以启用对应配置）：
+  #   宽松（默认）：                      digits=0  upper=0  lower=0  special=0
+  #   标准（1 位数字 + 1 种大小写）：     digits=1  upper=1  lower=1  special=0
+  #   严格（NIST 风格，管理员层）：       digits=1  upper=1  lower=1  special=1
+  #
+  # 校验消息键：validation.password.needs_{digit,upper,lower,special}
+  password-policy:
+    min-digits: 0
+    min-uppercase: 0
+    min-lowercase: 0
+    min-special: 0
+
+# 正版账户检测配置
+premium:
+  # Mojang/Ashcon 正版检测总开关。
+  #
+  # true（默认）：YouShuiAuth 对每个新昵称查询 Mojang / Ashcon，并对正版昵称
+  # 强制在线模式（Mojang 会话服务器认证）。正版所有者获得其 Mojang UUID
+  # （迁移的 LimboAuth /premium 账号除外，它们保留既有后端 UUID）；
+  # 在正版昵称上使用离线客户端会被拒绝，提示
+  # "You are not logged into your Minecraft account."。
+  #
+  # false：完全不对 Mojang/Ashcon 发起 HTTP 请求、不写 PREMIUM_UUIDS，
+  # 所有连接强制离线模式。所有玩家（包括 AUTH 中已有 PREMIUMUUID 的
+  # 正版所有者）都会获得离线 UUID。
+  # 适用于纯离线（破解）服务器与开发/测试环境。
+  check-enabled: true
+  # 允许离线玩家在正版昵称上注册 / 登录。
+  #
+  # 默认（false）：当有人使用 Mojang 已知的昵称（正版）连接时，
+  # YouShuiAuth 通过 Velocity 的 PreLoginComponentResult.forceOnlineMode()
+  # 强制 Mojang 会话服务器认证——即使 velocity.toml 中 online-mode = false。
+  # 正版昵称上的离线客户端会被拒绝，防止昵称盗用。
+  #
+  # true：对 YouShuiAuth 数据库中尚无记录的正版昵称改用 forceOfflineMode()，
+  # 离线客户端可抢先注册该昵称。一旦注册为离线，真正的正版所有者将无法
+  # 自动接管昵称——会进入昵称冲突路径，需管理员通过 /vauth conflicts 处理。
+  #
+  # 重要取舍：首次连接的新正版玩家将永久获得离线 UUID。Velocity 的
+  # PreLoginEvent 没有"先试在线、失败再离线"模式（见 PaperMC/Velocity#1590），
+  # 因此无法在同一昵称上给正版所有者与破解冒充者分配不同 UUID——
+  # 只能为整个连接选定一种模式。已在 AUTH 中的正版所有者保留其既有的
+  # 后端 UUID 身份。
+  #
+  # 仅当服务器明确接受正版昵称上的离线玩家并接受该取舍时才开启。
+  allow-cracked-on-premium-nicks: false
+  # 允许经 Mojang 验证的 Java 玩家跳过认证/大厅服务器，保留 Velocity 原本的
+  # forced-host / try-list 后端目标。
+  #
+  # 默认（false）：为升级保留既定流程——所有 Java 玩家都先经过认证服务器。
+  # true：仅 Player#isOnlineMode() 的连接跳过 limbo。解析器/缓存/名称匹配
+  # 都不会授予此跳过。离线玩家不受影响。
+  #
+  # 安全取舍：持有有效正版账号的机器人可直接触达后端资源。
+  # 仅在能接受削弱 limbo 隔离时开启。
+  bypass-auth-server: false
+  resolver:
+    # 查询 Mojang。其暂时不可用时，YouShuiAuth 还会尝试官方 Minecraft
+    # Services 的资料查询。两个端点共享此请求预算。
+    mojang-enabled: true
+    # 查询 Ashcon API
+    ashcon-enabled: true
+    # 查询 WPME API
+    wpme-enabled: false
+    # 单次请求超时（毫秒）
+    # Mojang/Ashcon 通常在 200-800ms 内响应；3000ms 提供余量，
+    # 避免最坏情况下的登录耗时过长（约 18 秒）。
+    request-timeout-ms: 3000
+    # 正向命中缓存 TTL（分钟）
+    # 正版状态稳定（Mojang 在改名后锁定名称 37 天）；
+    # 30 分钟 TTL 可将 API 调用减少 3 倍，同时仍能感知改名。
+    hit-ttl-minutes: 30
+    # 确认非正版名称的缓存 TTL（分钟）
+    # 非正版昵称不会突然变成正版（新购账号很少见）；
+    # 10 分钟是安全的，比旧的 3 分钟减少 3.3 倍调用。
+    # 瞬时的 UNKNOWN/API 失败不缓存，下次进服可重试。
+    miss-ttl-minutes: 10
+    # 在解析器缓存中保留用户名大小写
+    case-sensitive: true
+    # Caffeine W-TinyLFU 正版解析缓存的最大条目数。
+    # 高负载代理（1000+ 并发玩家）可调大；默认值适用于
+    # 数百名活跃玩家的服务器。
+    memory-cache-max-size: 10000
+    # 单一来源 IP 每分钟允许的冷查询上限。
+    # 缓存命中不消耗此预算。防止单个客户端耗尽所有玩家共享的
+    # Mojang/Ashcon 容量。
+    max-lookups-per-ip-per-minute: 30
+    # 同时执行的独立冷查询上限。同一昵称的并发请求共享一次查询，
+    # 仅占用一个全局槽位。
+    max-concurrent-lookups: 32
+    # 每个上游每分钟的出站请求上限。冷查询会扇出到已启用的镜像源，
+    # 重试消耗更多请求。Mojang 与其官方 Minecraft Services 回退共享
+    # 一个预算；回退仅在 Mojang 非限速失败时触发。设 0 可取消上限。
+    # Mojang 的实际限制约为每 IP 每分钟 200 次；120 留有余量。
+    # 空闲预算会积累四分之一分钟的请求量，突发时滚动分钟值可短暂
+    # 达到设定值的 1.25 倍（默认即 150）。
+    mojang-requests-per-minute: 120
+    ashcon-requests-per-minute: 60
+    wpme-requests-per-minute: 60
+    # 一次查询在失败关闭前可等待空闲槽位的时间（0-2000）。
+    # 等待会把突发变成稍慢的登录而不是直接踢出。只有首次尝试会等待，
+    # 因此单次查询最多增加此延迟——它叠加在 request-timeout-ms 之上，
+    # 并计入 Velocity 的连接超时（velocity.toml，默认 5000ms），
+    # PreLogin 超时将导致连接关闭。等待中的查询仍占用一个
+    # max-concurrent-lookups 槽位。
+    rate-limit-max-wait-ms: 1000
+
+# Floodgate / 基岩版支持配置
+# 必须与 Floodgate 代理配置保持一致。
+floodgate:
+  # 在 YouShuiAuth 中启用 Floodgate 基岩版处理
+  enabled: false
+  # Floodgate 在线 API 暂不可用时的回退前缀。
+  # API 就绪时，YouShuiAuth 直接从中读取实际前缀。
+  username-prefix: "."
+  # 仅经 Floodgate 确认的 UUID 可跳过认证服务器。
+  bypass-auth-server: true
+
+# 警报系统配置（可选 - Discord Webhook 通知）
+alerts:
+  # 启用/禁用警报系统
+  enabled: false
+  # 失败率超过此阈值时触发警报（0.0-1.0）
+  failure-rate-threshold: 0.5
+  # 触发警报前的最小请求数
+  min-requests-for-alert: 10
+  # 指标检查间隔（分钟）
+  check-interval-minutes: 5
+  # 警报之间的冷却时间（分钟）（防刷屏）
+  alert-cooldown-minutes: 30
+
+  # Discord webhook 配置（可选）
+  discord:
+    # 启用 Discord webhook 通知
+    enabled: false
+    # Discord webhook URL（从 Discord 服务器设置获取）
+    # 示例："https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    webhook-url: ""
+
+# 审计日志（将认证事件写入 VELOAUTH_AUDIT_LOG）
+audit-log:
+  # 启用/禁用审计日志（通过虚拟线程异步写入，故障开放）
+  enabled: true
+  # 保留天数；过期行每日清理（1-3650）
+  retention-days: 90
+
+# 双重身份验证（TOTP / RFC 6238）——按玩家可选开启。
+# 兼容 Google Authenticator、Authy、Aegis、FreeOTP 与 LimboAuth 令牌。
+# 完整设置流程与操作手册见 2FA.md。
+two-factor:
+  # 总开关。
+  # - true  → 玩家可 /2fa setup；已有令牌在 /login 时强制执行。
+  # - false → /2fa setup 被拒绝；已有令牌不再强制执行。
+  #           （管理员仍可通过 /ysauth 2fa-remove <昵称> 清除令牌。）
+  enabled: true
+  # 在身份验证器应用（Google Authenticator、Authy 等）中显示的名称，
+  # 位于每个保存的验证码旁边。不得包含 ':'（otpauth URI 保留）。
+  issuer: "YouShuiAuth"
+  # 在 /2fa setup / /2fa qr 输出中附加可点击的 [扫描二维码] 链接。
+  # 点击后在玩家浏览器中打开，将 otpauth:// URI 渲染为真正的二维码。
+  # 没有此链接时，玩家仍可获得纯 Base32 密钥 + otpauth URI 用于手动输入。
+  #
+  # 隐私：otpauth URI 包含共享的 TOTP 密钥。启用此项会把该密钥通过 TLS
+  # 发送到 YouShuiAuth 维护的 QR 端点。如果不希望任何数据离开你的
+  # 基础设施，请设为 false——玩家仍可手动输入 Base32 密钥。
+  qr-link-enabled: false
+  # BCrypt 验证成功与 TOTP 验证码输入之间的最大窗口（秒）。
+  # 超时后玩家必须重新 /login。范围：30-1800。默认：300（5 分钟）。
+  pending-timeout-seconds: 300
+
+# QQ 绑定 / 快捷登录（可选）
+# 桥接仅监听回环地址的 HTTP 端口，由 AstrBot 插件调用。
+# 除非已配套机器人插件并设置共享密钥，否则保持 qq.enabled=false。
+qq:
+  # 总开关。关闭 = 不启动监听、无 /qqbind 命令、无登录码。
+  enabled: false
+  # 保持回环地址；如需对外暴露，请用反向代理终结 TLS。
+  bind-address: "127.0.0.1"
+  port: 8765
+  # 与 AstrBot 插件共享的 HMAC-SHA256 密钥。至少 32 个字符。
+  # 轮换时两侧同时修改。
+  shared-secret: ""
+  # 允许绑定账号或确认登录的 QQ 群号。留空则拒绝所有群。
+  allowed-groups: []
+  # /qqbind 绑定码有效期（60-3600 秒）。
+  bind-code-ttl-seconds: 300
+  # 大厅快捷登录码有效期（30-600 秒）。应低于
+  # auth-server.timeout-seconds，避免登录码比 limbo 会话更长寿。
+  login-code-ttl-seconds: 120
+  # 桥接端点上单个 QQ 的尝试上限。
+  max-attempts-per-minute: 5
+
+# /ysauth report —— 生成诊断报告并上传到
+# https://mclo.gs 以便分享给支持人员。报告包含：
+#   - YouShuiAuth config.yml（已脱敏：密码、webhook URL、SSL 密钥）
+#   - velocity.toml（已脱敏：forwarding-secret 等）
+#   - 仅在显式开启 include-logs 时附带近期代理日志
+#   - 元数据：YouShuiAuth/Velocity/Java 版本、服务器数量、online-mode 等
+# 设为 false 可完全禁用 /ysauth report 命令。
+report:
+  enabled: true
+  # 日志可能包含 IP 地址、聊天与第三方插件机密。默认不包含。
+  # 显式开启后也会执行本地尽力脱敏，但报告仍只应分享给可信的支持人员。
+  include-logs: false
+
+# 匿名 bStats 遥测由 Velocity 的 bStats 全局文件控制，
+# 不由 YouShuiAuth 的 YAML 键控制：plugins/bStats/config.txt（修改后需重启）。
+# YouShuiAuth 上报聚合的环境数据，以及以下有界自定义图表：
+# 在线客户端协议版本、当前认证模式、数据库类型、内置/自定义语言、
+# 正版/Floodgate 路由、是否启用 2FA。
+# 昵称、UUID、IP 地址、主机名、数据库名与机密永远不会被包含。
+# 图表 ID 与 bStats 面板的一次性设置见 README.md。

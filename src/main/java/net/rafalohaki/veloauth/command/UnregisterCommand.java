@@ -1,0 +1,121 @@
+package net.rafalohaki.veloauth.command;
+
+import com.velocitypowered.api.command.CommandSource;
+import com.velocitypowered.api.command.SimpleCommand;
+import com.velocitypowered.api.proxy.Player;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.rafalohaki.veloauth.audit.AuditEventType;
+import net.rafalohaki.veloauth.audit.AuditLogService;
+import net.rafalohaki.veloauth.database.DatabaseManager;
+import net.rafalohaki.veloauth.model.RegisteredPlayer;
+import net.rafalohaki.veloauth.util.DatabaseErrorHandler;
+import net.rafalohaki.veloauth.util.PlayerAddressUtils;
+import org.slf4j.Marker;
+import org.slf4j.MarkerFactory;
+
+import java.util.UUID;
+
+/**
+ * Handles the admin /unregister command.
+ * Deletes a player account from the database and cleans up all caches.
+ */
+class UnregisterCommand implements SimpleCommand {
+
+    private static final String ERROR_DATABASE_QUERY = "error.database.query";
+    private static final Marker AUTH_MARKER = MarkerFactory.getMarker("AUTH");
+    private static final Marker DB_MARKER = MarkerFactory.getMarker("DATABASE");
+
+    private final CommandContext ctx;
+
+    UnregisterCommand(CommandContext ctx) {
+        this.ctx = ctx;
+    }
+
+    @Override
+    @SuppressWarnings("FutureReturnValueIgnored")
+    public void execute(Invocation invocation) {
+        CommandHelper.runAsAdmin(invocation, ctx.messages(), (source, args) -> {
+            if (args.length != 1) {
+                CommandHelper.sendError(source, ctx.messages(), "admin.unregister.usage");
+                return;
+            }
+            String nickname = args[0];
+            CommandHelper.runAsyncCommand(() -> processAdminUnregistration(source, nickname),
+                    ctx.messages(), source, ERROR_DATABASE_QUERY);
+        });
+    }
+
+    private void processAdminUnregistration(CommandSource source, String nickname) {
+        try {
+            var dbResult = ctx.databaseManager().findPlayerByNickname(nickname).join();
+
+            if (handleDatabaseError(dbResult, source, nickname, "Admin unregistration failed for")) {
+                return;
+            }
+
+            RegisteredPlayer registeredPlayer = dbResult.getValue();
+            if (registeredPlayer == null) {
+                source.sendMessage(ctx.messages().component(
+                        "admin.player_not_found", NamedTextColor.RED, nickname));
+                return;
+            }
+
+            UUID playerUuid = parsePlayerUuid(registeredPlayer, nickname, source);
+            if (playerUuid == null) {
+                return;
+            }
+
+            var deleteResult = ctx.databaseManager().deletePlayer(nickname).join();
+
+            if (handleDatabaseError(deleteResult, source, nickname, "Admin unregistration delete failed for")) {
+                return;
+            }
+
+            boolean deleted = Boolean.TRUE.equals(deleteResult.getValue());
+            if (deleted) {
+                ctx.authCache().removeAuthorizedPlayer(playerUuid);
+                ctx.authCache().endSession(playerUuid);
+                ctx.authCache().removePremiumPlayer(nickname);
+
+                ctx.plugin().getServer().getPlayer(nickname).ifPresent(player -> {
+                    player.disconnect(ctx.messages().component(
+                            "general.kick.message", NamedTextColor.YELLOW));
+                    ctx.logger().info("Disconnected player {} — account deleted by admin", nickname);
+                });
+
+                source.sendMessage(ctx.messages().component(
+                        "admin.account_deleted", NamedTextColor.GREEN, nickname));
+                String adminName = source instanceof Player player ? player.getUsername() : "CONSOLE";
+                ctx.logger().info(AUTH_MARKER, "Admin {} deleted player account: {}", adminName, nickname);
+
+                AuditLogService audit = ctx.plugin().getAuditLogService();
+                if (audit != null) {
+                    String adminIp = source instanceof Player p ? PlayerAddressUtils.getPlayerIp(p) : null;
+                    audit.save(AuditEventType.UNREGISTER, nickname, adminIp, "admin=" + adminName);
+                }
+
+            } else {
+                CommandHelper.sendError(source, ctx.messages(), ERROR_DATABASE_QUERY);
+                ctx.logger().error(DB_MARKER, "Failed to delete player account: {} (admin action)", nickname);
+            }
+
+        } catch (Exception e) {
+            ctx.logger().error(DB_MARKER, "Error during admin account deletion: {}", nickname, e);
+            CommandHelper.sendError(source, ctx.messages(), ERROR_DATABASE_QUERY);
+        }
+    }
+
+    private boolean handleDatabaseError(DatabaseManager.DbResult<?> result, CommandSource source, String nickname, String operation) {
+        return DatabaseErrorHandler.handleError(result, source, nickname, operation, ctx.logger(), ctx.messages());
+    }
+
+    private UUID parsePlayerUuid(RegisteredPlayer registeredPlayer, String nickname, CommandSource source) {
+        try {
+            return UUID.fromString(registeredPlayer.getUuid());
+        } catch (IllegalArgumentException e) {
+            ctx.logger().warn("Invalid UUID for player {}: {}", nickname, registeredPlayer.getUuid());
+            source.sendMessage(ctx.messages().component("admin.uuid_invalid", NamedTextColor.RED));
+            return null;
+        }
+    }
+}

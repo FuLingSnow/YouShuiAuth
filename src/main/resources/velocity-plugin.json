@@ -1,0 +1,16 @@
+{
+  "id": "youshuiauth",
+  "name": "YouShuiAuth",
+  "version": "${project.version}",
+  "description": "Complete Velocity Authentication Plugin with BCrypt, Virtual Threads and multi-database support",
+  "authors": [
+    "FuLingSnow"
+  ],
+  "main": "net.rafalohaki.veloauth.VeloAuth",
+  "dependencies": [
+    {
+      "id": "floodgate",
+      "optional": true
+    }
+  ]
+}

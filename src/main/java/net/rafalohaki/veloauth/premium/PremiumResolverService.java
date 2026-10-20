@@ -1,0 +1,830 @@
+package net.rafalohaki.veloauth.premium;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Expiry;
+import net.rafalohaki.veloauth.alert.PremiumResolverAlertService;
+import net.rafalohaki.veloauth.cache.VeloAuthCaches;
+import net.rafalohaki.veloauth.config.Settings;
+import net.rafalohaki.veloauth.config.Settings.PremiumResolverSettings;
+import net.rafalohaki.veloauth.database.PremiumUuidDao;
+import net.rafalohaki.veloauth.model.PremiumUuid;
+import org.slf4j.Logger;
+import org.slf4j.Marker;
+import org.slf4j.MarkerFactory;
+
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
+
+/**
+ * Aggregates premium resolvers with caching and priority fallback.
+ * <p>
+ * In-memory caching is delegated to Caffeine ({@link VeloAuthCaches#variableTtl}) so
+ * positive hits use the configured {@code hit-ttl-minutes} while confirmed offline names
+ * use the shorter {@code miss-ttl-minutes}. Transient UNKNOWN results are not cached. Capacity is
+ * bounded by {@code memory-cache-max-size}; W-TinyLFU handles eviction in O(1).
+ * <p>
+ * Cache expiry and eviction are delegated to Caffeine. Cold external work is additionally
+ * protected by per-source admission, single-flight nickname deduplication and a global
+ * concurrency semaphore. Those bound how many lookups run; the outbound request rate each
+ * upstream sees is bounded separately by {@link UpstreamRateLimiter}, shared by its endpoints.
+ */
+public class PremiumResolverService {
+
+    private static final Pattern VALID_USERNAME = Pattern.compile("^\\w{3,16}$");
+    private static final String RESOLVER_SERVICE = "resolver-service";
+    private static final Marker PREMIUM_MARKER = MarkerFactory.getMarker("PREMIUM");
+    private static final int DEFAULT_MAX_LOOKUPS_PER_IP_PER_MINUTE = 30;
+    private static final int DEFAULT_MAX_CONCURRENT_LOOKUPS = 32;
+
+    /** Below this, an upstream ceiling refuses ordinary logins instead of pacing them. */
+    private static final int MIN_SANE_REQUESTS_PER_MINUTE = 10;
+
+    /** Resolver ID treated as authoritative for OFFLINE classification. Must match
+     *  {@link ResolverConfig#MOJANG}{@code .id()} — that resolver is the single source of
+     *  truth for "this name exists / does not exist as a premium account". Other resolvers
+     *  (Ashcon, wpme) are mirrors and can be stale or partial, so their OFFLINE alone is
+     *  weaker evidence. See {@link #selectBestResult} for the decision rule. */
+    static final String AUTHORITATIVE_RESOLVER_ID = ResolverConfig.MOJANG.id();
+    private static final String MINECRAFT_SERVICES_RESOLVER_ID = ResolverConfig.MINECRAFT_SERVICES.id();
+    private static final Set<String> AUTHORITATIVE_RESOLVER_IDS = Set.of(
+            AUTHORITATIVE_RESOLVER_ID, MINECRAFT_SERVICES_RESOLVER_ID);
+
+    private final Logger logger;
+    private final PremiumUuidDao dao; // Renamed to avoid conflict with class name
+    private final List<PremiumResolver> resolvers;
+    private final Cache<String, PremiumResolution> cache;
+    private final long premiumTtlMillis;
+    private final long missTtlMillis;
+    private final int maxCacheSize;
+    private final PremiumResolverAlertService alertService;
+    private final PremiumLookupAdmissionController admissionController;
+    private final Semaphore externalLookupPermits;
+    private final ConcurrentHashMap<String, CompletableFuture<PremiumResolution>> inFlight =
+            new ConcurrentHashMap<>();
+    private volatile boolean shuttingDown;
+
+    public PremiumResolverService(Logger logger, Settings settings, PremiumUuidDao premiumUuidDao) {
+        this(logger, settings, premiumUuidDao, null);
+    }
+
+    public PremiumResolverService(Logger logger, Settings settings, PremiumUuidDao premiumUuidDao,
+                                  PremiumResolverAlertService alertService) {
+        this.logger = Objects.requireNonNull(logger, "logger");
+        PremiumResolverSettings rs = Objects.requireNonNull(settings, "settings").getPremiumResolverSettings();
+        this.dao = Objects.requireNonNull(premiumUuidDao, "premiumUuidDao");
+        this.alertService = alertService;
+
+        logResolverConfiguration(rs);
+
+        this.resolvers = createDefaultResolvers(logger, rs);
+
+        this.premiumTtlMillis = Math.max(0L, rs.getHitTtlMinutes()) * 60_000L;
+        this.missTtlMillis = Math.max(0L, rs.getMissTtlMinutes()) * 60_000L;
+        int configuredMaxSize = rs.getMemoryCacheMaxSize();
+        this.maxCacheSize = configuredMaxSize > 0 ? configuredMaxSize : 10_000;
+        this.cache = VeloAuthCaches.variableTtl(this.maxCacheSize, perEntryExpiry());
+        this.admissionController = new PremiumLookupAdmissionController(
+                positiveOrDefault(rs.getMaxLookupsPerIpPerMinute(),
+                        DEFAULT_MAX_LOOKUPS_PER_IP_PER_MINUTE));
+        this.externalLookupPermits = new Semaphore(
+                positiveOrDefault(rs.getMaxConcurrentLookups(), DEFAULT_MAX_CONCURRENT_LOOKUPS), true);
+
+        if (premiumTtlMillis == 0 && logger.isWarnEnabled()) {
+            logger.warn(PREMIUM_MARKER, "[PremiumResolver] hitTtlMinutes = 0 — premium cache disabled, every login will query API!");
+        }
+        if (missTtlMillis == 0 && logger.isWarnEnabled()) {
+            logger.warn(PREMIUM_MARKER, "[PremiumResolver] missTtlMinutes = 0 — miss cache disabled, every unknown player will query API!");
+        }
+        warnAboutRiskyUpstreamBudgets(rs);
+    }
+
+    /**
+     * Flags request ceilings that are more likely to be a mistake than a choice. Throttling
+     * misconfigured downwards denies legitimate players, and misconfigured upwards defeats the
+     * point of having a ceiling — both are silent until someone reads the logs.
+     */
+    private void warnAboutRiskyUpstreamBudgets(PremiumResolverSettings rs) {
+        if (!logger.isWarnEnabled()) {
+            return;
+        }
+        for (ResolverConfig config : ResolverConfig.values()) {
+            if (isEnabled(config, rs) && !config.isFallbackOnly()) {
+                warnAboutUpstreamBudget(config.id(), requestsPerMinute(config, rs),
+                        config.reportedLimitPerMinute());
+            }
+        }
+    }
+
+    private void warnAboutUpstreamBudget(String resolverId, int requestsPerMinute,
+                                         int reportedProviderLimit) {
+        if (requestsPerMinute == 0) {
+            logger.warn(PREMIUM_MARKER,
+                    "[PremiumResolver] {} request ceiling disabled — a join wave of new players can "
+                            + "exceed the provider's own limit", resolverId);
+        } else if (requestsPerMinute < MIN_SANE_REQUESTS_PER_MINUTE) {
+            logger.warn(PREMIUM_MARKER,
+                    "[PremiumResolver] {} ceiling of {}/min is very low — ordinary logins will be "
+                            + "refused rather than paced", resolverId, requestsPerMinute);
+        } else if (reportedProviderLimit != ResolverConfig.UNKNOWN_REPORTED_LIMIT
+                && requestsPerMinute > reportedProviderLimit) {
+            logger.warn(PREMIUM_MARKER,
+                    "[PremiumResolver] {} ceiling of {}/min exceeds the commonly reported {}/min "
+                            + "limit, and an idle burst adds up to 25% more",
+                    resolverId, requestsPerMinute, reportedProviderLimit);
+        }
+    }
+
+    PremiumResolverService(Logger logger,
+                           PremiumUuidDao premiumUuidDao,
+                           List<PremiumResolver> resolvers,
+                           long premiumTtlMillis,
+                           long missTtlMillis) {
+        this(logger, premiumUuidDao, resolvers, premiumTtlMillis, missTtlMillis,
+                DEFAULT_MAX_LOOKUPS_PER_IP_PER_MINUTE, DEFAULT_MAX_CONCURRENT_LOOKUPS);
+    }
+
+    PremiumResolverService(Logger logger,
+                           PremiumUuidDao premiumUuidDao,
+                           List<PremiumResolver> resolvers,
+                           long premiumTtlMillis,
+                           long missTtlMillis,
+                           int maxLookupsPerIpPerMinute,
+                           int maxConcurrentLookups) {
+        this.logger = Objects.requireNonNull(logger, "logger");
+        this.dao = Objects.requireNonNull(premiumUuidDao, "premiumUuidDao");
+        this.resolvers = List.copyOf(Objects.requireNonNull(resolvers, "resolvers"));
+        this.premiumTtlMillis = Math.max(0L, premiumTtlMillis);
+        this.missTtlMillis = Math.max(0L, missTtlMillis);
+        this.maxCacheSize = 10_000;
+        this.alertService = null;
+        this.cache = VeloAuthCaches.variableTtl(this.maxCacheSize, perEntryExpiry());
+        this.admissionController = new PremiumLookupAdmissionController(maxLookupsPerIpPerMinute);
+        if (maxConcurrentLookups <= 0) {
+            throw new IllegalArgumentException("maxConcurrentLookups must be > 0");
+        }
+        this.externalLookupPermits = new Semaphore(maxConcurrentLookups, true);
+    }
+
+    private static int positiveOrDefault(int configured, int fallback) {
+        return configured > 0 ? configured : fallback;
+    }
+
+    /**
+     * Builds the per-entry expiry policy. Captured premium / miss TTLs are final
+     * by the time this is called, so the returned {@link Expiry} can read them
+     * via the enclosing instance fields without any mutation hazard.
+     */
+    private Expiry<String, PremiumResolution> perEntryExpiry() {
+        return new Expiry<>() {
+            @Override
+            public long expireAfterCreate(String key, PremiumResolution value, long currentTime) {
+                return computeTtlNanos(value);
+            }
+
+            @Override
+            public long expireAfterUpdate(String key, PremiumResolution value, long currentTime, long currentDuration) {
+                return computeTtlNanos(value);
+            }
+
+            @Override
+            public long expireAfterRead(String key, PremiumResolution value, long currentTime, long currentDuration) {
+                return currentDuration;
+            }
+        };
+    }
+
+    /**
+     * TTL conversion helper. Cache-skip semantics (TTL ≤ 0 = "do not cache this kind of result")
+     * live in {@link #cacheResult}; here we only handle the positive case so the Expiry never
+     * has to think about disabled tiers.
+     */
+    private long computeTtlNanos(PremiumResolution value) {
+        long ttlMillis = value.isPremium() ? premiumTtlMillis : missTtlMillis;
+        return ttlMillis <= 0L ? 1L : TimeUnit.MILLISECONDS.toNanos(ttlMillis);
+    }
+
+    private static List<PremiumResolver> createDefaultResolvers(Logger logger, PremiumResolverSettings settings) {
+        int timeoutMs = Math.max(100, settings.getRequestTimeoutMs());
+        int maxWaitMs = settings.getRateLimit().getMaxWaitMillis();
+        List<PremiumResolver> resolverList = new ArrayList<>();
+        Map<String, UpstreamRateLimiter> rateLimiters = new HashMap<>();
+        for (ResolverConfig config : ResolverConfig.values()) {
+            UpstreamRateLimiter limiter = rateLimiters.computeIfAbsent(
+                    config.rateLimitGroup(), group -> UpstreamRateLimiter.perMinute(
+                            group, requestsPerMinute(config, settings), maxWaitMs));
+            resolverList.add(new ConfigurablePremiumResolver(
+                    logger, isEnabled(config, settings), timeoutMs, config, limiter));
+        }
+        return Collections.unmodifiableList(resolverList);
+    }
+
+    /**
+     * Maps a resolver to its {@code *-enabled} flag. Keeping the mapping in one switch means a
+     * new resolver is a compile error here rather than a silently unconfigured one.
+     */
+    private static boolean isEnabled(ResolverConfig config, PremiumResolverSettings settings) {
+        return switch (config) {
+            case MOJANG -> settings.isMojangEnabled();
+            case ASHCON -> settings.isAshconEnabled();
+            case WPME -> settings.isWpmeEnabled();
+            case MINECRAFT_SERVICES -> settings.isMojangEnabled();
+        };
+    }
+
+    /** Maps a resolver to its {@code *-requests-per-minute} ceiling. */
+    private static int requestsPerMinute(ResolverConfig config, PremiumResolverSettings settings) {
+        Settings.ResolverRateLimitSettings limits = settings.getRateLimit();
+        return switch (config) {
+            case MOJANG -> limits.getMojangRequestsPerMinute();
+            case ASHCON -> limits.getAshconRequestsPerMinute();
+            case WPME -> limits.getWpmeRequestsPerMinute();
+            case MINECRAFT_SERVICES -> limits.getMojangRequestsPerMinute();
+        };
+    }
+
+    private void logResolverConfiguration(PremiumResolverSettings rs) {
+        if (!logger.isInfoEnabled()) {
+            return;
+        }
+        logger.info(PREMIUM_MARKER,
+                "[PremiumResolver] Config - Mojang (with official Minecraft Services fallback): {}, "
+                        + "Ashcon: {}, Wpme: {}",
+                rs.isMojangEnabled(), rs.isAshconEnabled(), rs.isWpmeEnabled());
+        Settings.ResolverRateLimitSettings limits = rs.getRateLimit();
+        logger.info(PREMIUM_MARKER,
+                "[PremiumResolver] Upstream request ceiling per minute - Mojang: {}, Ashcon: {}, "
+                        + "Wpme: {} (max wait {}ms, 0 = unlimited)",
+                limits.getMojangRequestsPerMinute(),
+                limits.getAshconRequestsPerMinute(),
+                limits.getWpmeRequestsPerMinute(),
+                limits.getMaxWaitMillis());
+    }
+
+    /**
+     * Rozwiązuje status premium przez API resolvers.
+     *
+     * @param trimmed  Nazwa gracza (trimmed)
+     * @param cacheKey Klucz do cache
+     * @return PremiumResolution z API lub offline
+     */
+    private PremiumResolution resolveFromApi(String trimmed, String cacheKey) {
+        PremiumResolution offlineCandidate = tryApiResolvers(trimmed);
+
+        if (offlineCandidate != null) {
+            cacheResult(cacheKey, offlineCandidate);
+            return offlineCandidate;
+        }
+
+        if (logger.isWarnEnabled()) {
+            logger.warn(PREMIUM_MARKER, "[PremiumResolver] No premium resolvers enabled - defaulting offline");
+        }
+        PremiumResolution disabled = PremiumResolution.offline(trimmed, RESOLVER_SERVICE, "no resolvers enabled");
+        cacheResult(cacheKey, disabled);
+        return disabled;
+    }
+
+    /**
+     * Próbuje wszystkie API resolvers RÓWNOLEGLE.
+     * Zwraca pierwszy wynik PREMIUM lub pierwszy OFFLINE jeśli żaden nie jest premium.
+     * Używa Virtual Threads dla maksymalnej wydajności.
+     *
+     * @param trimmed Nazwa gracza
+     * @return PremiumResolution lub null jeśli żaden resolver nie włączony
+     */
+    private PremiumResolution tryApiResolvers(String trimmed) {
+        List<PremiumResolver> enabledResolvers = resolvers.stream()
+                .filter(PremiumResolver::enabled)
+                .toList();
+
+        if (enabledResolvers.isEmpty()) {
+            return null;
+        }
+
+        List<PremiumResolver> fallbackResolvers = enabledResolvers.stream()
+                .filter(resolver -> isFallbackOnly(resolver.id()))
+                .toList();
+        List<PremiumResolver> primaryResolvers = enabledResolvers.stream()
+                .filter(resolver -> !isFallbackOnly(resolver.id()))
+                .toList();
+        ResolverResults results = executeResolversInParallel(primaryResolvers, trimmed);
+        if (shouldUseMinecraftServicesFallback(results, fallbackResolvers)) {
+            results = results.merge(executeResolversInParallel(fallbackResolvers, trimmed));
+        }
+        return selectBestResult(results, trimmed);
+    }
+
+    private static boolean isFallbackOnly(String resolverId) {
+        return MINECRAFT_SERVICES_RESOLVER_ID.equals(resolverId);
+    }
+
+    private static boolean shouldUseMinecraftServicesFallback(
+            ResolverResults results, List<PremiumResolver> fallbackResolvers) {
+        if (fallbackResolvers.isEmpty()) {
+            return false;
+        }
+        PremiumResolution mojang = results.byId(AUTHORITATIVE_RESOLVER_ID);
+        if (mojang == null || !mojang.isUnknown()) {
+            return false;
+        }
+        String reason = mojang.message();
+        return !"upstream rate limit".equals(reason) && !"http 429".equals(reason);
+    }
+
+    private ResolverResults executeResolversInParallel(List<PremiumResolver> enabledResolvers, String trimmed) {
+        ConcurrentHashMap<String, PremiumResolution> byResolver = new ConcurrentHashMap<>();
+
+        List<CompletableFuture<Void>> futures = enabledResolvers.stream()
+                .map(resolver -> createResolverFuture(resolver, trimmed, byResolver))
+                .toList();
+
+        awaitResolverFutures(futures);
+        return new ResolverResults(Map.copyOf(byResolver));
+    }
+
+    private CompletableFuture<Void> createResolverFuture(
+            PremiumResolver resolver, String trimmed,
+            ConcurrentHashMap<String, PremiumResolution> byResolver) {
+        return CompletableFuture.runAsync(
+                () -> {
+                    PremiumResolution resolution = executeResolver(resolver, trimmed);
+                    byResolver.put(resolver.id(), resolution);
+                },
+                net.rafalohaki.veloauth.util.VirtualThreadExecutorProvider.getVirtualExecutor()
+        );
+    }
+
+    private PremiumResolution executeResolver(PremiumResolver resolver, String trimmed) {
+        try {
+            PremiumResolution rawResolution = resolver.resolve(trimmed);
+            PremiumResolution resolution = normalizeResolution(resolver, rawResolution, trimmed);
+            logResolution(resolver, trimmed, resolution);
+            // API responded (premium or offline) = success; unknown = treated as failure for alerting
+            recordAlertMetric(resolver.id(), !resolution.isUnknown());
+            return resolution;
+        } catch (Exception e) {
+            logResolverFailure(resolver, trimmed, e);
+            recordAlertMetric(resolver.id(), false);
+            return PremiumResolution.unknown(resolver.id(), e.getMessage());
+        }
+    }
+
+    private void recordAlertMetric(String resolverId, boolean success) {
+        if (alertService != null) {
+            alertService.recordResolution(resolverId, success);
+        }
+    }
+
+    private void logResolution(PremiumResolver resolver, String trimmed, PremiumResolution resolution) {
+        if (!logger.isDebugEnabled()) {
+            return;
+        }
+        if (resolution.isPremium()) {
+            logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned PREMIUM for {}", resolver.id(), trimmed);
+        } else if (resolution.isOffline()) {
+            logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned OFFLINE for {}", resolver.id(), trimmed);
+        } else {
+            logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned UNKNOWN for {}: {}",
+                    resolver.id(), trimmed, resolution.message());
+        }
+    }
+
+    private void logResolverFailure(PremiumResolver resolver, String trimmed, Exception e) {
+        if (logger.isWarnEnabled()) {
+            logger.warn(PREMIUM_MARKER, "[PARALLEL] {} failed for {}: {}", resolver.id(), trimmed, e.getMessage());
+        }
+    }
+
+    private void awaitResolverFutures(List<CompletableFuture<Void>> futures) {
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .join();
+        } catch (Exception e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug(PREMIUM_MARKER, "[PARALLEL] Error waiting for resolvers: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Picks the final answer from per-resolver results using a tiered trust policy.
+     *
+     * <h2>Decision rule (in order)</h2>
+     * <ol>
+     *   <li><b>PREMIUM answers</b> → all positive answers must agree on UUID. Mojang wins
+     *       deterministically when present; conflicting UUIDs return UNKNOWN (fail-closed).</li>
+     *   <li><b>An authoritative OFFLINE answer with no positive answer</b> → trust it. Mojang and
+     *       its official Minecraft Services fallback are authoritative; other resolvers are mirrors.</li>
+     *   <li><b>Both authoritative endpoints silent + all mirrors OFFLINE</b>
+     *       → trust OFFLINE. Strong consensus from independent mirrors is treated as a quorum
+     *       substitute for an unavailable first-party endpoint.</li>
+     *   <li><b>Authoritative endpoints silent + any mirror UNKNOWN</b> → return UNKNOWN. Mixing OFFLINE with
+     *       UNKNOWN from another mirror is insufficient evidence; the listener will deny the
+     *       login (fail-closed). This is the case the previous "any OFFLINE wins" logic got
+     *       wrong — it could classify a premium account as OFFLINE when Mojang timed out and
+     *       Ashcon's mirror was stale, opening a name-sniping window.</li>
+     *   <li><b>All resolvers UNKNOWN</b> → return UNKNOWN.</li>
+     * </ol>
+     */
+    private PremiumResolution selectBestResult(ResolverResults results, String trimmed) {
+        PremiumResolution premium = selectConsistentPremium(results, trimmed);
+        if (premium != null) {
+            if (premium.isUnknown()) {
+                return premium;
+            }
+            if (logger.isInfoEnabled()) {
+                logger.info(PREMIUM_MARKER, "[PARALLEL] Premium confirmed for {} from {}",
+                        trimmed, premium.source());
+            }
+            return premium;
+        }
+
+        PremiumResolution authoritativeOffline = results.authoritativeOfflineResult();
+        if (authoritativeOffline != null) {
+            if (logger.isDebugEnabled()) {
+                logger.debug(PREMIUM_MARKER,
+                        "[PARALLEL] {} resolved as OFFLINE by authoritative resolver ({})",
+                        trimmed, authoritativeOffline.source());
+            }
+            return authoritativeOffline;
+        }
+
+        // First-party endpoints silent (UNKNOWN or disabled). Trust OFFLINE only if every
+        // enabled mirror also said OFFLINE; any UNKNOWN voids the quorum.
+        List<PremiumResolution> nonMojang = results.nonAuthoritativeResults();
+        boolean haveQuorum = !nonMojang.isEmpty()
+                && nonMojang.stream().allMatch(PremiumResolution::isOffline);
+        if (haveQuorum) {
+            PremiumResolution offline = nonMojang.get(0);
+            if (logger.isDebugEnabled()) {
+                logger.debug(PREMIUM_MARKER,
+                        "[PARALLEL] {} resolved as OFFLINE by mirror quorum ({} resolvers agreed)",
+                        trimmed, nonMojang.size());
+            }
+            return offline;
+        }
+
+        logQuorumFailure(results, trimmed);
+        return PremiumResolution.unknown(RESOLVER_SERVICE,
+                "no quorum: mojang=" + statusSummary(results.byId(AUTHORITATIVE_RESOLVER_ID))
+                        + ", minecraft-services=" + statusSummary(results.byId(MINECRAFT_SERVICES_RESOLVER_ID))
+                        + ", non-mojang=" + nonMojangSummary(nonMojang));
+    }
+
+    private PremiumResolution selectConsistentPremium(ResolverResults results, String trimmed) {
+        List<PremiumResolution> premiumResults = results.premiumResultsByPriority();
+        if (premiumResults.isEmpty()) {
+            return null;
+        }
+
+        PremiumResolution selected = premiumResults.get(0);
+        for (int i = 1; i < premiumResults.size(); i++) {
+            PremiumResolution candidate = premiumResults.get(i);
+            if (!selected.uuid().equals(candidate.uuid())) {
+                logger.error(PREMIUM_MARKER,
+                        "[PARALLEL] Conflicting premium UUIDs for {} from {} and {} - denying login",
+                        trimmed, selected.source(), candidate.source());
+                return PremiumResolution.unknown(RESOLVER_SERVICE,
+                        "premium resolver UUID disagreement");
+            }
+        }
+        return selected;
+    }
+
+    private void logQuorumFailure(ResolverResults results, String trimmed) {
+        if (!logger.isWarnEnabled()) {
+            return;
+        }
+        PremiumResolution mojang = results.byId(AUTHORITATIVE_RESOLVER_ID);
+        PremiumResolution minecraftServices = results.byId(MINECRAFT_SERVICES_RESOLVER_ID);
+        List<PremiumResolution> nonMojang = results.nonAuthoritativeResults();
+        logger.warn(PREMIUM_MARKER,
+                "[PARALLEL] {} UNKNOWN: mojang={} minecraft-services={} non-mojang={} "
+                        + "— login will be denied (fail-closed)",
+                trimmed, statusSummary(mojang), statusSummary(minecraftServices), nonMojangSummary(nonMojang));
+    }
+
+    private static String statusLabel(PremiumResolution resolution) {
+        if (resolution == null) {
+            return "absent";
+        }
+        if (resolution.isPremium()) {
+            return "PREMIUM";
+        }
+        if (resolution.isOffline()) {
+            return "OFFLINE";
+        }
+        return "UNKNOWN";
+    }
+
+    private static String statusSummary(PremiumResolution resolution) {
+        String status = statusLabel(resolution);
+        if (resolution == null || !resolution.isUnknown()
+                || resolution.message() == null || resolution.message().isBlank()) {
+            return status;
+        }
+        StringBuilder safeReason = new StringBuilder();
+        for (int index = 0; index < resolution.message().length() && safeReason.length() < 120; index++) {
+            char character = resolution.message().charAt(index);
+            safeReason.append(Character.isISOControl(character) ? ' ' : character);
+        }
+        return status + " (" + safeReason + ")";
+    }
+
+    private static String nonMojangSummary(List<PremiumResolution> nonMojang) {
+        if (nonMojang.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < nonMojang.size(); i++) {
+            PremiumResolution r = nonMojang.get(i);
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(r.source()).append('=').append(statusSummary(r));
+        }
+        return sb.append(']').toString();
+    }
+
+    /**
+     * Per-resolver result bag returned by {@link #executeResolversInParallel}.
+     * Keyed by {@link PremiumResolver#id()} so {@link #selectBestResult} can apply
+     * resolver-specific trust (e.g. Mojang is authoritative for OFFLINE).
+     */
+    private record ResolverResults(Map<String, PremiumResolution> byResolver) {
+
+        ResolverResults merge(ResolverResults other) {
+            Map<String, PremiumResolution> merged = new HashMap<>(byResolver);
+            merged.putAll(other.byResolver);
+            return new ResolverResults(Map.copyOf(merged));
+        }
+
+        List<PremiumResolution> premiumResultsByPriority() {
+            List<Map.Entry<String, PremiumResolution>> entries = byResolver.entrySet().stream()
+                    .filter(entry -> entry.getValue() != null && entry.getValue().isPremium())
+                    .sorted(Comparator
+                            .comparingInt((Map.Entry<String, PremiumResolution> entry) ->
+                                    resolverPriority(entry.getKey()))
+                            .thenComparing(Map.Entry::getKey))
+                    .toList();
+            return entries.stream().map(Map.Entry::getValue).toList();
+        }
+
+        PremiumResolution byId(String id) {
+            return byResolver.get(id);
+        }
+
+        PremiumResolution authoritativeOfflineResult() {
+            PremiumResolution mojang = byResolver.get(AUTHORITATIVE_RESOLVER_ID);
+            if (mojang != null && mojang.isOffline()) {
+                return mojang;
+            }
+            PremiumResolution minecraftServices = byResolver.get(MINECRAFT_SERVICES_RESOLVER_ID);
+            return minecraftServices != null && minecraftServices.isOffline()
+                    ? minecraftServices
+                    : null;
+        }
+
+        List<PremiumResolution> nonAuthoritativeResults() {
+            return byResolver.entrySet().stream()
+                    .sorted(Map.Entry.comparingByKey())
+                    .filter(entry -> !AUTHORITATIVE_RESOLVER_IDS.contains(entry.getKey())
+                            && entry.getValue() != null)
+                    .map(Map.Entry::getValue)
+                    .toList();
+        }
+
+        private static int resolverPriority(String resolverId) {
+            if (AUTHORITATIVE_RESOLVER_ID.equals(resolverId)) {
+                return 0;
+            }
+            return AUTHORITATIVE_RESOLVER_IDS.contains(resolverId) ? 1 : 2;
+        }
+    }
+
+    public PremiumResolution resolve(String username) {
+        return resolve(username, null);
+    }
+
+    /**
+     * Resolves premium status while enforcing an abuse budget for external client traffic.
+     * A {@code null} address is reserved for trusted internal refreshes and tests.
+     */
+    public PremiumResolution resolve(String username, InetAddress sourceAddress) {
+        if (username == null || username.isBlank()) {
+            return PremiumResolution.offline(username, RESOLVER_SERVICE, "empty username");
+        }
+
+        String trimmed = username.trim();
+        if (!VALID_USERNAME.matcher(trimmed).matches()) {
+            return PremiumResolution.offline(trimmed, RESOLVER_SERVICE, "invalid characters");
+        }
+
+        String cacheKey = trimmed.toLowerCase(Locale.ROOT);
+
+        // 1. Sprawdź memory cache (najszybsze)
+        PremiumResolution cached = getFromCache(cacheKey);
+        if (cached != null) {
+            if (logger.isDebugEnabled()) {
+                logger.debug(PREMIUM_MARKER, "[PremiumResolver] memory cache hit {} -> {}", trimmed, cached.status());
+            }
+            return cached;
+        }
+
+        // 2. Sprawdź database cache (persistency)
+        Optional<PremiumUuid> dbResult = dao.findByNickname(trimmed);
+        if (dbResult.isPresent() && isDbCacheEntryFresh(dbResult.get())) {
+            PremiumUuid premiumUuid = dbResult.get();
+            PremiumResolution result = PremiumResolution.premium(
+                    premiumUuid.getUuid(),
+                    trimmed,
+                    RESOLVER_SERVICE + "-db-cache"
+            );
+
+            // Zapisz do memory cache
+            cacheResult(cacheKey, result);
+            if (logger.isInfoEnabled()) {
+                logger.info(PREMIUM_MARKER, "[PremiumResolver] database cache hit {} -> {} (UUID: {})",
+                        trimmed, result.status(), premiumUuid.getUuid());
+            }
+            return result;
+        }
+
+        if (dbResult.isPresent() && logger.isDebugEnabled()) {
+            logger.debug(PREMIUM_MARKER,
+                    "[PremiumResolver] DB cache entry for {} stale (lastSeen age > hit-ttl) — refreshing from API",
+                    trimmed);
+        }
+
+        // 3. Cache miss (or stale DB entry) — admit external API work per source.
+        if (!admissionController.tryAcquire(sourceAddress)) {
+            logger.debug(PREMIUM_MARKER,
+                    "[PremiumResolver] External lookup budget exhausted for source {}",
+                    sourceAddress.getHostAddress());
+            return PremiumResolution.unknown(RESOLVER_SERVICE, "source lookup budget exhausted");
+        }
+
+        return resolveExternalSingleFlight(trimmed, cacheKey);
+    }
+
+    private PremiumResolution resolveExternalSingleFlight(String username, String cacheKey) {
+        if (shuttingDown) {
+            return PremiumResolution.unknown(RESOLVER_SERVICE, "resolver service shutting down");
+        }
+
+        CompletableFuture<PremiumResolution> leaderFuture = new CompletableFuture<>();
+        CompletableFuture<PremiumResolution> existing = inFlight.putIfAbsent(cacheKey, leaderFuture);
+        if (existing != null) {
+            return existing.join();
+        }
+
+        PremiumResolution refreshedCacheEntry = getFromCache(cacheKey);
+        if (refreshedCacheEntry != null) {
+            leaderFuture.complete(refreshedCacheEntry);
+            inFlight.remove(cacheKey, leaderFuture);
+            return refreshedCacheEntry;
+        }
+
+        boolean permitAcquired = externalLookupPermits.tryAcquire();
+        if (!permitAcquired) {
+            PremiumResolution saturated = PremiumResolution.unknown(
+                    RESOLVER_SERVICE, "global lookup capacity exhausted");
+            leaderFuture.complete(saturated);
+            inFlight.remove(cacheKey, leaderFuture);
+            logger.debug(PREMIUM_MARKER,
+                    "[PremiumResolver] Global external lookup capacity exhausted for {}", username);
+            return saturated;
+        }
+
+        try {
+            PremiumResolution resolution = resolveFromApi(username, cacheKey);
+            leaderFuture.complete(resolution);
+            return resolution;
+        } catch (RuntimeException e) {
+            PremiumResolution failed = PremiumResolution.unknown(
+                    RESOLVER_SERVICE, "external lookup failed");
+            leaderFuture.complete(failed);
+            logger.warn(PREMIUM_MARKER,
+                    "[PremiumResolver] External lookup failed for {}: {}", username, e.getMessage());
+            return failed;
+        } finally {
+            externalLookupPermits.release();
+            inFlight.remove(cacheKey, leaderFuture);
+        }
+    }
+
+    /**
+     * Treats a DB cache entry as fresh only if its last-seen timestamp is within the
+     * configured hit-ttl. Without this guard a stale {@code PREMIUM_UUIDS} row could
+     * trigger an erroneous account migration in {@code findAndMigrateByPremiumUuid}
+     * when the player's actual Mojang UUID has since changed.
+     * <p>
+     * Entries without a positive verification timestamp are stale. LimboAuth premium
+     * accounts are recovered from the authoritative AUTH table by PreLoginHandler;
+     * PREMIUM_UUIDS is only a cache and must never manufacture migration authority.
+     * <p>
+     * A non-positive hit-ttl disables caching entirely (every login queries the API —
+     * the same contract {@link #cacheResult} applies to the memory tier), so no DB row
+     * is fresh in that mode.
+     */
+    private boolean isDbCacheEntryFresh(PremiumUuid entry) {
+        long lastSeen = entry.getLastSeen();
+        if (lastSeen <= 0L) {
+            return false;
+        }
+        if (premiumTtlMillis <= 0L) {
+            return false;
+        }
+        long age = System.currentTimeMillis() - lastSeen;
+        return age >= 0 && age <= premiumTtlMillis;
+    }
+
+    private PremiumResolution normalizeResolution(PremiumResolver resolver, PremiumResolution resolution, String requestName) {
+        String source = resolver.id();
+        if (resolution == null) {
+            return PremiumResolution.unknown(source, "null resolution");
+        }
+
+        source = resolution.source() != null ? resolution.source() : source;
+        String canonical = resolution.canonicalUsername() != null ? resolution.canonicalUsername() : requestName;
+
+        if (resolution.status() == PremiumResolution.PremiumStatus.PREMIUM) {
+            return validatePremiumResolution(resolution, source, canonical, requestName);
+        } else if (resolution.status() == PremiumResolution.PremiumStatus.OFFLINE) {
+            return PremiumResolution.offline(requestName, source, resolution.message());
+        } else {
+            return PremiumResolution.unknown(source, resolution.message());
+        }
+    }
+
+    private PremiumResolution validatePremiumResolution(PremiumResolution resolution, String source, String canonical, String requestName) {
+        if (resolution.uuid() == null) {
+            return PremiumResolution.unknown(source, "missing uuid");
+        }
+        if (!canonical.equalsIgnoreCase(requestName)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug(PREMIUM_MARKER, "[PremiumResolver] username mismatch {} vs {} from {}", canonical, requestName, source);
+            }
+            return PremiumResolution.offline(requestName, source, "username mismatch with canonical name");
+        }
+        return PremiumResolution.premium(resolution.uuid(), canonical, source);
+    }
+
+    /**
+     * Cache read. Caffeine's per-entry TTL hides expired entries from {@code getIfPresent},
+     * collapsing the previous "lookup → expiry check → conditional remove" branch into a
+     * single call.
+     */
+    private PremiumResolution getFromCache(String key) {
+        return cache.getIfPresent(key);
+    }
+
+    /**
+     * Cache confirmed results only. When a TTL tier is disabled, drop the entry instead of
+     * putting one with a phantom TTL so the next login queries the API again.
+     */
+    private void cacheResult(String key, PremiumResolution resolution) {
+        if (resolution.isUnknown()) {
+            cache.invalidate(key);
+            return;
+        }
+        long ttl = resolution.isPremium() ? premiumTtlMillis : missTtlMillis;
+        if (ttl <= 0L) {
+            cache.invalidate(key);
+            return;
+        }
+        cache.put(key, resolution);
+    }
+
+    /**
+     * Clears the in-memory premium resolution cache and releases resources.
+     * Must be called during plugin shutdown before DatabaseManager is closed.
+     */
+    public void shutdown() {
+        shuttingDown = true;
+        PremiumResolution shutdownResolution = PremiumResolution.unknown(
+                RESOLVER_SERVICE, "resolver service shutting down");
+        inFlight.values().forEach(future -> future.complete(shutdownResolution));
+        inFlight.clear();
+        admissionController.clear();
+        long size = cache.estimatedSize();
+        cache.invalidateAll();
+        cache.cleanUp();
+        if (logger.isDebugEnabled()) {
+            logger.debug(PREMIUM_MARKER, "[PremiumResolver] Shutdown complete — cleared {} cached entries", size);
+        }
+    }
+}

@@ -1,0 +1,1195 @@
+package net.rafalohaki.veloauth;
+
+import jakarta.inject.Inject;
+import com.velocitypowered.api.event.Subscribe;
+import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
+import com.velocitypowered.api.plugin.Plugin;
+import com.velocitypowered.api.plugin.Dependency;
+import com.velocitypowered.api.plugin.annotation.DataDirectory;
+import com.velocitypowered.api.proxy.Player;
+import com.velocitypowered.api.proxy.ProxyServer;
+import net.rafalohaki.veloauth.cache.AuthCache;
+import net.rafalohaki.veloauth.command.CommandHandler;
+import net.rafalohaki.veloauth.command.QqAuthService;
+import net.rafalohaki.veloauth.config.Settings;
+import net.rafalohaki.veloauth.connection.AuthTimeoutScheduler;
+import net.rafalohaki.veloauth.connection.ConnectionManager;
+import net.rafalohaki.veloauth.database.DatabaseConfig;
+import net.rafalohaki.veloauth.database.DatabaseManager;
+import net.rafalohaki.veloauth.database.DatabaseType;
+import net.rafalohaki.veloauth.database.HikariConfigParams;
+import net.rafalohaki.veloauth.exception.VeloAuthException;
+import net.rafalohaki.veloauth.i18n.Messages;
+import net.rafalohaki.veloauth.listener.AuthListener;
+import net.rafalohaki.veloauth.listener.ListenerFactory;
+import net.rafalohaki.veloauth.lifecycle.ConnectionLifecycleRegistry;
+import net.rafalohaki.veloauth.alert.PremiumResolverAlertService;
+import net.rafalohaki.veloauth.audit.AuditLogService;
+import net.rafalohaki.veloauth.auth.totp.PendingTotpStore;
+import net.rafalohaki.veloauth.auth.totp.TotpReplayGuard;
+import net.rafalohaki.veloauth.auth.totp.TotpService;
+import net.rafalohaki.veloauth.authserver.AuthServerProvider;
+import net.rafalohaki.veloauth.premium.PremiumResolverService;
+import net.rafalohaki.veloauth.qq.QqBridgeServer;
+import net.rafalohaki.veloauth.qq.QqSettings;
+import net.rafalohaki.veloauth.util.FloodgateDetector;
+import net.rafalohaki.veloauth.util.VirtualThreadExecutorProvider;
+import org.bstats.velocity.Metrics;
+import org.slf4j.Logger;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+
+/**
+ * Velocity proxy authentication plugin.
+ * Manages player auth flows between Velocity, a configurable auth server, and backend servers.
+ */
+@Plugin(
+        id = "youshuiauth",
+        name = "YouShuiAuth",
+        version = BuildConstants.VERSION,
+        description = "Complete Velocity Authentication Plugin with BCrypt, Virtual Threads and multi-database support",
+    authors = {"Rafal"},
+    dependencies = {
+        @Dependency(id = "floodgate", optional = true)
+    }
+)
+public class VeloAuth {
+
+    private static final int BSTATS_PLUGIN_ID = 28142;
+    private static final long CLEANUP_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 5;
+
+    private final ProxyServer server;
+    private final Logger logger;
+    private final Path dataDirectory;
+    private final Metrics.Factory metricsFactory;
+    private final ConnectionLifecycleRegistry connectionLifecycleRegistry =
+            new ConnectionLifecycleRegistry();
+
+    private volatile Metrics metrics;
+
+    // Główne komponenty pluginu
+    private Settings settings;
+    private Messages messages;
+    private DatabaseManager databaseManager;
+    private AuthCache authCache;
+    private CommandHandler commandHandler;
+    private ConnectionManager connectionManager;
+    private AuthServerProvider authServerProvider;
+    private AuthTimeoutScheduler authTimeoutScheduler;
+    private QqBridgeServer qqBridgeServer;
+    /**
+     * Volatile: read by EarlyLoginBlocker from the initialization future's dependent stage.
+     * The future's happens-before already covers the phase-8 assignment, but the field is
+     * published safely on its own so no future call site has to re-derive that reasoning.
+     */
+    private volatile AuthListener authListener;
+    private PremiumResolverService premiumResolverService;
+    private PremiumResolverAlertService premiumResolverAlertService;
+    private AuditLogService auditLogService;
+    private TotpService totpService;
+    private PendingTotpStore pendingTotpStore;
+    private TotpReplayGuard totpReplayGuard;
+    private net.rafalohaki.veloauth.report.ReportService reportService;
+    private ScheduledExecutorService premiumDbCleanupScheduler;
+    private ScheduledExecutorService auditLogCleanupScheduler;
+    private ScheduledExecutorService qqCleanupScheduler;
+
+    // Status pluginu
+    // CRITICAL: This flag protects against early connections during initialization
+    // - Starts as FALSE to block connections
+    // - Set to TRUE only after ALL components successfully initialize
+    // - Remains FALSE if initialization fails (prevents connections to broken plugin)
+    // - Set to FALSE during shutdown to reject new operations
+    private volatile boolean initialized = false;
+    private volatile boolean shutdownStarted = false;
+
+    // Startup queue: connections arriving during init wait on this future instead of getting kicked
+    private final CompletableFuture<Void> initializationFuture = new CompletableFuture<>();
+    private final ReentrantLock lifecycleLock = new ReentrantLock();
+
+    /**
+     * Konstruktor VeloAuth.
+     *
+     * @param server        ProxyServer instance
+     * @param logger        Logger instance
+     * @param dataDirectory Path do data folder
+     */
+    @Inject
+    public VeloAuth(ProxyServer server, Logger logger, @DataDirectory Path dataDirectory, Metrics.Factory metricsFactory) {
+        this.server = server;
+        this.logger = logger;
+        this.dataDirectory = dataDirectory;
+        this.metricsFactory = metricsFactory;
+
+        migrateLegacyDataDirectory(dataDirectory, logger);
+        logger.info("YouShuiAuth instance created.");
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("VeloAuth konstruktor - Java {}, Velocity API {}",
+                    System.getProperty("java.version"),
+                    server.getVersion().getVersion());
+        }
+    }
+
+    private static void migrateLegacyDataDirectory(Path dataDirectory, Logger logger) {
+        try {
+            if (!Files.isDirectory(dataDirectory)) {
+                return;
+            }
+            try (var entries = Files.list(dataDirectory)) {
+                if (entries.findAny().isPresent()) {
+                    return; // already migrated or fresh install with content
+                }
+            }
+            Path legacy = dataDirectory.getParent() == null
+                    ? null : dataDirectory.getParent().resolve("veloauth");
+            if (legacy == null || !Files.isDirectory(legacy)) {
+                return;
+            }
+            try (var sources = Files.walk(legacy)) {
+                for (Path source : sources.toList()) {
+                    Path target = dataDirectory.resolve(legacy.relativize(source).toString());
+                    if (Files.isDirectory(source)) {
+                        Files.createDirectories(target);
+                    } else {
+                        Files.createDirectories(target.getParent());
+                        Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
+            }
+        } catch (Exception migrationFailure) {
+            logger.warn("Legacy data directory migration failed - continuing with defaults",
+                    migrationFailure);
+        }
+    }
+
+    
+    private boolean reloadLanguageFiles() {
+        try {
+            // Get new language from reloaded config
+            String newLanguage = settings.getLanguage();
+            
+            // Reload with potentially new language setting
+            messages.reloadWithLanguage(newLanguage);
+            logger.info("Language files reloaded successfully (language: {})", newLanguage);
+            return true;
+        } catch (IOException e) {
+            logger.error("Failed to reload language files", e);
+            return false;
+        }
+    }
+
+    /**
+     * Inicjalizacja pluginu przy starcie proxy.
+     */
+    @Subscribe
+    public void onProxyInitialize(ProxyInitializeEvent event) {
+        logVersion();
+        logEnvironment();
+
+        if (!registerEarlyLoginBlocker()) {
+            return;
+        }
+
+        // Inicjalizacja asynchroniczna z Virtual Threads
+        // skipcq: JAVA-W1087 - Future is properly handled with whenComplete
+        long initializationStartTime = System.currentTimeMillis();
+        
+        CompletableFuture.runAsync(this::initializePlugin, VirtualThreadExecutorProvider.getVirtualExecutor())
+                .whenComplete((result, throwable) -> handleInitializationResult(throwable, initializationStartTime));
+    }
+
+    private void logVersion() {
+        try {
+            logger.info("Loading YouShuiAuth v{}...", getVersion());
+        } catch (Exception e) {
+            logger.error("Failed to retrieve version from BuildConstants", e);
+            logger.info("Loading YouShuiAuth (version unknown)...");
+        }
+    }
+
+    private void logEnvironment() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Java: {}, Virtual Threads: {}",
+                    System.getProperty("java.version"),
+                    Thread.currentThread().isVirtual() ? "Available" : "Unavailable");
+        }
+    }
+
+    private boolean registerEarlyLoginBlocker() {
+        // CRITICAL: Register early PreLogin blocker BEFORE starting async initialization
+        // This prevents players from connecting before authentication handlers are ready
+        if (logger.isDebugEnabled()) {
+            logger.debug("Registering early PreLogin blocker for initialization protection...");
+        }
+        try {
+            var earlyBlocker = ListenerFactory.createEarlyLoginBlocker(this);
+            server.getEventManager().register(this, earlyBlocker);
+            if (logger.isDebugEnabled()) {
+                logger.debug("✅ EarlyLoginBlocker registered BEFORE initialization - PreLogin protection active");
+            }
+            return true;
+        } catch (Exception e) {
+            logger.error("Failed to register early PreLogin blocker", e);
+            return false;
+        }
+    }
+
+    private void handleInitializationResult(Throwable throwable, long startTime) {
+        long initializationDuration = System.currentTimeMillis() - startTime;
+        
+        if (throwable != null) {
+            logger.error("❌ VeloAuth initialization FAILED after {} ms", initializationDuration, throwable);
+            // CRITICAL: Keep initialized flag as FALSE to prevent connections to broken plugin
+            logger.warn("⚠️ Initialization flag remains FALSE - all player connections will be blocked");
+            initializationFuture.completeExceptionally(throwable);
+            shutdown();
+        } else {
+            finalizeInitialization(initializationDuration);
+        }
+    }
+
+    private void finalizeInitialization(long initializationDuration) {
+        // Clear any stale cache entries from previous server runs
+        if (databaseManager != null) {
+            databaseManager.clearCache();
+        }
+        if (authCache != null) {
+            authCache.clearAll();
+        }
+
+        lifecycleLock.lock();
+        try {
+            if (shutdownStarted) {
+                logger.warn("Skipping initialization completion because shutdown already started");
+                return;
+            }
+
+            initialized = true;
+            initializationFuture.complete(null);
+        } finally {
+            lifecycleLock.unlock();
+        }
+
+        initializeMetricsSafely();
+        logStartupInfo(initializationDuration);
+        scheduleEmbeddedProtocolUpdate();
+    }
+
+    private void scheduleEmbeddedProtocolUpdate() {
+        AuthServerProvider provider = authServerProvider;
+        if (provider == null || !provider.isProtocolRuntimeUpdateEnabled()) {
+            return;
+        }
+        if (!VirtualThreadExecutorProvider.submitTask(provider::stageProtocolRuntimeUpdate)) {
+            logger.debug("Reviewed embedded protocol runtime check was skipped during shutdown");
+        }
+    }
+
+    private void initializeMetricsSafely() {
+        Metrics candidate = null;
+        try {
+            candidate = Objects.requireNonNull(
+                    metricsFactory.make(this, BSTATS_PLUGIN_ID),
+                    "bStats metrics factory returned null");
+            BStatsCharts.register(candidate, server, settings);
+        } catch (RuntimeException e) {
+            closeMetricsSafely(candidate);
+            logger.warn("bStats initialization failed; VeloAuth will continue without metrics", e);
+            return;
+        }
+
+        boolean published;
+        lifecycleLock.lock();
+        try {
+            published = !shutdownStarted && metrics == null;
+            if (published) {
+                metrics = candidate;
+            }
+        } finally {
+            lifecycleLock.unlock();
+        }
+
+        if (!published) {
+            closeMetricsSafely(candidate);
+            logger.debug("bStats initialization discarded because the plugin is stopping or metrics already exist");
+        }
+    }
+
+    private void shutdownMetricsSafely() {
+        Metrics activeMetrics;
+        lifecycleLock.lock();
+        try {
+            activeMetrics = metrics;
+            metrics = null;
+        } finally {
+            lifecycleLock.unlock();
+        }
+        closeMetricsSafely(activeMetrics);
+    }
+
+    private void closeMetricsSafely(Metrics metricsToClose) {
+        if (metricsToClose == null) {
+            return;
+        }
+        try {
+            metricsToClose.shutdown();
+        } catch (RuntimeException exception) {
+            logger.warn("bStats shutdown failed; continuing VeloAuth cleanup", exception);
+        }
+    }
+
+    /**
+     * Zamknięcie pluginu przy wyłączaniu proxy.
+     */
+    @Subscribe
+    public void onProxyShutdown(ProxyShutdownEvent event) {
+        // Operator-facing log: hardcoded English (matches the 1.2.0 P1.2 strategy that converted
+        // every operator log out of i18n). Avoids encoding-mismatch artifacts when the host
+        // container ships without UTF-8 locale (Polish "Zamknięty" would render as "Zamkni?ty").
+        if (logger.isInfoEnabled()) {
+            logger.info("=== VeloAuth - Shutdown ===");
+        }
+
+        shutdown();
+
+        if (logger.isInfoEnabled()) {
+            logger.info("=== VeloAuth - Closed ===");
+        }
+    }
+
+    /**
+     * Helper method to reduce cognitive complexity in error handling.
+     * Logs error if enabled and throws the specified exception.
+     */
+    private void logErrorAndRethrow(String message, Exception cause, RuntimeException toThrow) {
+        if (logger.isErrorEnabled()) {
+            logger.error(message, cause);
+        }
+        throw toThrow;
+    }
+
+    /**
+     * Inicjalizuje wszystkie komponenty pluginu.
+     */
+    private void initializePlugin() {
+        try {
+            initializeConfiguration();
+            initializeMessages();
+            initializeDatabase();
+            initializeAuditLog();
+            initializeTwoFactor();
+            initializeCache();
+            initializeCommands();
+            initializeQqBridge();
+            initializeReportService();
+            initializeConnectionManager();
+            initializePremiumResolver();
+            initializeListeners();
+            debugServers();
+
+            if (logger.isDebugEnabled()) {
+                logger.debug(messages.get("plugin.initialization.components_ready"));
+            }
+
+        } catch (VeloAuthException e) {
+            logErrorAndRethrow("VeloAuth error during initialization", e, e);
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            logErrorAndRethrow("Critical error during VeloAuth initialization", e, 
+                VeloAuthException.configuration("plugin initialization", e));
+        } catch (Exception e) {
+            logErrorAndRethrow("Unexpected error during VeloAuth initialization", e, 
+                VeloAuthException.configuration("unexpected error", e));
+        }
+    }
+
+    private void initializeConfiguration() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("📋 [1/8] Loading configuration...");
+        }
+        long startTime = System.currentTimeMillis();
+        
+        settings = new Settings(dataDirectory);
+        if (!settings.load()) {
+            throw VeloAuthException.configuration("settings loading", null);
+        }
+        
+        if (logger.isDebugEnabled()) {
+            logger.debug("✅ Configuration loaded in {} ms", System.currentTimeMillis() - startTime);
+        }
+    }
+
+    private void initializeMessages() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("💬 [2/8] Initializing message system...");
+        }
+        long startTime = System.currentTimeMillis();
+        
+        String language = settings.getLanguage();
+        
+        try {
+            messages = new Messages(dataDirectory, language);
+            if (logger.isDebugEnabled()) {
+                logger.debug("✅ Message system initialized in {} ms (Language: {}, External files: enabled)", 
+                        System.currentTimeMillis() - startTime, language);
+            }
+        } catch (IOException e) {
+            logger.error("Failed to initialize external language files, falling back to JAR-embedded files", e);
+            messages = new Messages();
+            messages.setLanguage(language);
+            if (logger.isDebugEnabled()) {
+                logger.debug("✅ Message system initialized in {} ms (Language: {}, External files: disabled)", 
+                        System.currentTimeMillis() - startTime, language);
+            }
+        }
+    }
+
+    private void initializeDatabase() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("🗄️ [3/8] Initializing database connection...");
+        }
+        long startTime = System.currentTimeMillis();
+        
+        DatabaseConfig dbConfig = createDatabaseConfig();
+        databaseManager = new DatabaseManager(dbConfig, messages);
+
+        boolean dbInitialized = databaseManager.initialize().join();
+        if (!dbInitialized) {
+            throw VeloAuthException.database("initialization", null);
+        }
+        
+        if (logger.isDebugEnabled()) {
+            logger.debug("✅ Database initialized in {} ms (Type: {})", 
+                    System.currentTimeMillis() - startTime, settings.getDatabaseStorageType());
+        }
+    }
+
+    private void initializeAuditLog() {
+        Settings.AuditLogSettings auditSettings = settings.getAuditLogSettings();
+        boolean enabled = auditSettings.isEnabled();
+        auditLogService = new AuditLogService(databaseManager.getAuditLogDao(), enabled);
+
+        if (!enabled) {
+            if (logger.isInfoEnabled()) {
+                logger.info("Audit log disabled by configuration");
+            }
+            return;
+        }
+
+        int retentionDays = auditSettings.getRetentionDays();
+        auditLogCleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "VeloAuth-AuditLogCleanup");
+            t.setDaemon(true);
+            return t;
+        });
+        auditLogCleanupScheduler.scheduleAtFixedRate(() -> {
+            try {
+                int pruned = auditLogService.prune(retentionDays);
+                if (pruned > 0 && logger.isInfoEnabled()) {
+                    logger.info("Audit log cleanup removed {} entries older than {} days", pruned, retentionDays);
+                }
+            } catch (RuntimeException e) {
+                logger.error("Audit log cleanup failed", e);
+            }
+        }, 1, 24, TimeUnit.HOURS);
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("Audit log initialized (retention: {} days)", retentionDays);
+        }
+    }
+
+    /**
+     * Phase 3.5: Two-Factor (TOTP) services. Always instantiated — even when
+     * {@code two-factor.enabled=false} — because {@code TotpService} is a stateless
+     * verifier and {@code PendingTotpStore} is cheap. The complete two-factor tree is
+     * restart-scoped: call sites read the active startup snapshot, and reload records edits as
+     * pending until the next full proxy restart.
+     */
+    private void initializeTwoFactor() {
+        Settings.TwoFactorSettings twoFactorSettings = settings.getTwoFactorSettings();
+        this.totpService = new TotpService();
+        this.totpReplayGuard = new TotpReplayGuard();
+        java.time.Duration pendingTtl = java.time.Duration.ofSeconds(twoFactorSettings.getPendingTimeoutSeconds());
+        this.pendingTotpStore = new PendingTotpStore(pendingTtl, auditLogService);
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("2FA initialized (enabled: {}, pending-timeout: {}s, issuer: {})",
+                    twoFactorSettings.isEnabled(),
+                    twoFactorSettings.getPendingTimeoutSeconds(),
+                    twoFactorSettings.getIssuer());
+        }
+    }
+
+    private void initializeCache() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("💾 [4/8] Initializing authentication cache...");
+        }
+        long startTime = System.currentTimeMillis();
+        
+        authCache = new AuthCache(
+                new AuthCache.AuthCacheConfig(
+                    settings.getCacheTtlMinutes(),
+                    settings.getCacheMaxSize(),
+                    settings.getCacheMaxSize(), // maxSessions - użyj tej samej wartości co maxSize
+                    10000, // maxPremiumCache - set to 10000 as per requirement 6.5
+                    settings.getBruteForceMaxAttempts(),
+                    settings.getBruteForceTimeoutMinutes(),
+                    settings.getCacheCleanupIntervalMinutes(),
+                    settings.getSessionTimeoutMinutes()
+                ),
+                settings,
+                messages
+        );
+        
+        // Set AuthCache reference in DatabaseManager for cache invalidation coordination
+        if (databaseManager != null) {
+            databaseManager.setAuthCacheReference(authCache);
+            logger.debug("AuthCache reference set in DatabaseManager");
+        }
+
+        // Schedule periodic cleanup of expired PREMIUM_UUIDS entries from the database
+        long premiumTtlMinutes = (long) settings.getPremiumTtlHours() * 60;
+        if (premiumTtlMinutes > 0 && databaseManager != null) {
+            premiumDbCleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "VeloAuth-PremiumDbCleanup");
+                t.setDaemon(true);
+                return t;
+            });
+            premiumDbCleanupScheduler.scheduleAtFixedRate(() -> {
+                try {
+                    int cleaned = databaseManager.getPremiumUuidDao()
+                            .cleanExpiredEntries(premiumTtlMinutes);
+                    if (cleaned > 0) {
+                        logger.info("Cleaned {} expired premium UUID cache entries from database", cleaned);
+                    }
+                } catch (Exception e) {
+                    logger.error("Error during premium UUID DB cleanup", e);
+                }
+            }, 1, 1, TimeUnit.HOURS);
+        }
+        
+        logger.debug("✅ Cache initialized in {} ms (TTL: {} min, Max size: {}, Premium cache: 10000)", 
+                System.currentTimeMillis() - startTime, 
+                settings.getCacheTtlMinutes(), 
+                settings.getCacheMaxSize());
+    }
+
+    private void initializeCommands() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("⌨️ [5/8] Registering commands...");
+        }
+        long startTime = System.currentTimeMillis();
+        
+        commandHandler = new CommandHandler(this, databaseManager, authCache, settings, messages);
+        commandHandler.registerCommands();
+        
+        logger.debug("✅ Commands registered in {} ms", System.currentTimeMillis() - startTime);
+    }
+
+    /**
+     * Starts the loopback QQ bridge. Failure is non-fatal: password authentication must keep
+     * working even when the optional bot integration cannot bind its port.
+     */
+    private void initializeQqBridge() {
+        QqSettings qqSettings = settings.getQqSettings();
+        if (!qqSettings.isEnabled()) {
+            logger.debug("QQ bridge disabled by configuration");
+            return;
+        }
+        if (commandHandler == null) {
+            logger.warn("QQ bridge not started: command layer is unavailable");
+            return;
+        }
+        try {
+            QqBridgeServer candidate = new QqBridgeServer(
+                    qqSettings, commandHandler.getQqAuthService());
+            candidate.start();
+            qqBridgeServer = candidate;
+            qqCleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread thread = new Thread(r, "YouShuiAuth-QqCleanup");
+                thread.setDaemon(true);
+                return thread;
+            });
+            qqCleanupScheduler.scheduleAtFixedRate(this::cleanupQqTables, 1, 24, TimeUnit.HOURS);
+        } catch (IOException e) {
+            logger.error("Failed to start QQ bridge on {}:{} — QQ features disabled",
+                    qqSettings.getBindAddress(), qqSettings.getPort(), e);
+        }
+    }
+
+    /** Drops expired one-time codes and remember-device tokens; keeps the tables bounded. */
+    private void cleanupQqTables() {
+        try {
+            var qqDao = databaseManager == null ? null : databaseManager.getQqDao();
+            if (qqDao == null) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            int codes = qqDao.deleteExpiredLinkCodes(now);
+            int tokens = qqDao.purgeExpiredRememberTokens(now);
+            if ((codes > 0 || tokens > 0) && logger.isInfoEnabled()) {
+                logger.info("QQ cleanup removed {} expired codes and {} remember tokens",
+                        codes, tokens);
+            }
+        } catch (Exception e) {
+            logger.error("QQ table cleanup failed", e);
+        }
+    }
+
+    private void initializeReportService() {
+        reportService = new net.rafalohaki.veloauth.report.ReportService(this, settings);
+        if (logger.isDebugEnabled()) {
+            logger.debug("📋 Report service initialized (enabled={})", settings.isReportEnabled());
+        }
+    }
+
+    private void initializeConnectionManager() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("🔌 [6/8] Initializing connection manager...");
+        }
+        long startTime = System.currentTimeMillis();
+
+        authServerProvider = AuthServerProvider.create(server, settings, messages, logger, dataDirectory);
+        authServerProvider.start();
+        connectionManager = new ConnectionManager(
+                this, authCache, settings, messages, authServerProvider);
+        authTimeoutScheduler = new AuthTimeoutScheduler(this, settings, messages, authCache, connectionManager);
+
+        logger.debug("✅ Connection manager initialized in {} ms (auth timeout: {}s)",
+                System.currentTimeMillis() - startTime,
+                settings.getAuthServerTimeoutSeconds());
+    }
+
+    private void initializePremiumResolver() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("👑 [7/8] Initializing premium resolver service...");
+        }
+        long startTime = System.currentTimeMillis();
+
+        if (settings.getAlertSettings().isEnabled()) {
+            premiumResolverAlertService = new PremiumResolverAlertService(settings);
+            logger.info("Premium resolver Discord alerts enabled (webhook configured: {})",
+                    settings.getAlertSettings().isDiscordEnabled());
+        }
+
+        premiumResolverService = new PremiumResolverService(
+                logger, settings, databaseManager.getPremiumUuidDao(), premiumResolverAlertService);
+
+        logger.debug("✅ Premium resolver initialized in {} ms (Enabled: {}, Alerts: {})",
+                System.currentTimeMillis() - startTime,
+                settings.isPremiumCheckEnabled(),
+                premiumResolverAlertService != null);
+    }
+
+    private void initializeListeners() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("🎧 [8/8] Registering event listeners...");
+        }
+        long startTime = System.currentTimeMillis();
+        
+        // CRITICAL: Create handlers BEFORE AuthListener
+        var preLoginHandler = ListenerFactory.createPreLoginHandler(
+            authCache, premiumResolverService, settings, databaseManager,
+            messages, logger);
+        logger.debug("PreLoginHandler created successfully");
+        
+        var postLoginHandler = ListenerFactory.createPostLoginHandler(
+            authCache, databaseManager,
+            messages, logger);
+        logger.debug("PostLoginHandler created successfully");
+        
+        // Create AuthListener with initialized handlers and ConnectionManager
+        authListener = new AuthListener(
+            this, authCache, settings,
+            preLoginHandler, postLoginHandler, connectionManager, databaseManager, messages);
+        
+        server.getEventManager().register(this, authListener);
+        logger.debug("✅ Event listeners registered in {} ms (PreLoginHandler + PostLoginHandler + AuthListener)", 
+                System.currentTimeMillis() - startTime);
+    }
+
+    private void debugServers() {
+        connectionManager.debugServers();
+    }
+
+    /**
+     * Simple pending operations cleanup.
+     * Components handle their own graceful shutdown internally.
+     */
+    private void waitForPendingOperations() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Component shutdown in progress - pending operations handled internally");
+        }
+    }
+
+    /**
+     * Creates database configuration from settings.
+     * Uses HikariCP for remote databases (MySQL, PostgreSQL).
+     */
+    private DatabaseConfig createDatabaseConfig() {
+        String storageType = settings.getDatabaseStorageType();
+        DatabaseType dbType = DatabaseType.fromName(storageType);
+
+        if (dbType != null && dbType.isLocalDatabase()) {
+            // Local databases - standard JDBC in the plugin data directory; legacy files
+            // from the proxy working directory are migrated (or kept as fallback) once.
+            return DatabaseConfig.forLocalDatabaseWithMigration(
+                    storageType, settings.getDatabaseName(), settings.getDataDirectory(), logger);
+        } else {
+            // Remote databases - use HikariCP for better performance
+            return DatabaseConfig.forRemoteWithHikari(
+                    HikariConfigParams.builder()
+                            .storageType(storageType)
+                            .hostname(settings.getDatabaseHostname())
+                            .port(settings.getDatabasePort())
+                            .database(settings.getDatabaseName())
+                            .user(settings.getDatabaseUser())
+                            .password(settings.getDatabasePassword())
+                            .connectionPoolSize(settings.getDatabaseConnectionPoolSize())
+                            .maxLifetime((int) settings.getDatabaseMaxLifetimeMillis())
+                            .connectionParameters(settings.getDatabaseConnectionParameters())
+                            .postgreSQLSettings(settings.getPostgreSQLSettings())
+                            .debugEnabled(settings.isDebugEnabled())
+                            .build()
+            );
+        }
+    }
+
+    /**
+     * Zamyka wszystkie komponenty pluginu z graceful shutdown.
+     */
+    private void shutdown() {
+        lifecycleLock.lock();
+        try {
+            if (shutdownStarted) {
+                logger.debug("Shutdown already in progress - skipping duplicate shutdown request");
+                return;
+            }
+
+            shutdownStarted = true;
+            initialized = false;
+            initializationFuture.completeExceptionally(new IllegalStateException("Plugin shutting down"));
+        } finally {
+            lifecycleLock.unlock();
+        }
+
+        // Publish the terminal connection barrier before any fallible shutdown step or drain.
+        connectionLifecycleRegistry.close();
+        logger.info("🔴 Initialization flag set to FALSE - blocking all new player connections");
+
+        try {
+            logger.info("Initiating VeloAuth graceful shutdown...");
+
+            shutdownMetricsSafely();
+
+            // 1. Unregister event listeners
+            if (authListener != null) {
+                server.getEventManager().unregisterListener(this, authListener);
+                logger.debug("AuthListener unregistered");
+            }
+
+            // 2. Unregister command handlers
+            if (commandHandler != null) {
+                commandHandler.unregisterCommands();
+                commandHandler.shutdown();
+                logger.debug("Commands unregistered");
+            }
+
+            // 3. Wait for pending operations (2 second timeout)
+            waitForPendingOperations();
+
+            shutdownComponentsInReverseOrder();
+
+            logger.info("VeloAuth shutdown completed successfully");
+
+        } catch (RuntimeException e) {
+            // A failing component must not abort the sequence before Hikari, the cleanup
+            // schedulers and the VT executor get closed — close them here as a last resort.
+            logger.error("Error during graceful shutdown - forcing remaining components closed", e);
+            connectionLifecycleRegistry.close();
+            closeAuthServerProviderSafely();
+            if (databaseManager != null) {
+                try {
+                    databaseManager.shutdown();
+                } catch (RuntimeException dbEx) {
+                    logger.error("DatabaseManager shutdown failed during forced cleanup", dbEx);
+                }
+            }
+            VirtualThreadExecutorProvider.shutdown();
+        }
+    }
+
+    /** Components shut down in reverse initialization order; the DB pool and VT executor go last. */
+    private void shutdownComponentsInReverseOrder() {
+        if (qqBridgeServer != null) {
+            qqBridgeServer.close();
+            qqBridgeServer = null;
+            logger.debug("QQ bridge stopped");
+        }
+
+        if (authTimeoutScheduler != null) {
+            authTimeoutScheduler.shutdown();
+            logger.debug("AuthTimeoutScheduler shut down");
+        }
+
+        if (connectionManager != null) {
+            connectionManager.shutdown();
+            logger.debug("ConnectionManager shut down");
+        }
+        if (authServerProvider != null) {
+            closeAuthServerProviderSafely();
+        }
+
+        shutdownCleanupScheduler(qqCleanupScheduler, "QQ cleanup scheduler");
+        shutdownCleanupScheduler(premiumDbCleanupScheduler, "Premium DB cleanup scheduler");
+        shutdownCleanupScheduler(auditLogCleanupScheduler, "Audit log cleanup scheduler");
+
+        if (premiumResolverService != null) {
+            premiumResolverService.shutdown();
+            logger.debug("PremiumResolverService shut down");
+        }
+
+        if (premiumResolverAlertService != null) {
+            premiumResolverAlertService.close();
+            logger.debug("PremiumResolverAlertService shut down");
+        }
+
+        if (authCache != null) {
+            authCache.shutdown();
+            logger.debug("AuthCache shut down");
+        }
+
+        if (databaseManager != null) {
+            databaseManager.shutdown();
+            logger.debug("DatabaseManager shut down");
+        }
+
+        VirtualThreadExecutorProvider.shutdown();
+        logger.debug("VirtualThreadExecutorProvider shut down");
+    }
+
+    /** Clears only state owned by a concrete connection; it performs no database or backend I/O. */
+    public void clearConnectionBoundState(
+            Player player, AuthCache connectionAuthCache,
+            ConnectionManager connectionManagerOwner) {
+        Objects.requireNonNull(player, "player");
+        clearConnectionBoundState(
+                player, player.getUniqueId(), connectionAuthCache, connectionManagerOwner);
+    }
+
+    /** Variant for async/lifecycle paths that captured the UUID while the Player was valid. */
+    public void clearConnectionBoundState(
+            Player player, java.util.UUID playerId, AuthCache connectionAuthCache,
+            ConnectionManager connectionManagerOwner) {
+        Objects.requireNonNull(player, "player");
+        Objects.requireNonNull(playerId, "playerId");
+        Objects.requireNonNull(connectionAuthCache, "connectionAuthCache");
+        Objects.requireNonNull(connectionManagerOwner, "connectionManagerOwner");
+        runConnectionCleanup("authorization cache", playerId,
+                () -> connectionAuthCache.removeAuthorizedPlayer(playerId));
+        runConnectionCleanup("session cache", playerId,
+                () -> connectionAuthCache.endSession(playerId));
+        if (pendingTotpStore != null) {
+            runConnectionCleanup("pending two-factor state", playerId,
+                    () -> pendingTotpStore.invalidate(playerId));
+        }
+        runConnectionCleanup("connection-manager state", playerId,
+                () -> connectionManagerOwner.clearTransferState(player));
+        if (authTimeoutScheduler != null) {
+            runConnectionCleanup("authentication timeout", playerId,
+                    () -> authTimeoutScheduler.cancel(playerId));
+        }
+    }
+
+    private void runConnectionCleanup(String component, java.util.UUID playerId, Runnable cleanup) {
+        try {
+            cleanup.run();
+        } catch (RuntimeException exception) {
+            logger.error("Failed to clear {} for retired connection {}",
+                    component, playerId, exception);
+        }
+    }
+
+    private void closeAuthServerProviderSafely() {
+        if (authServerProvider == null) {
+            return;
+        }
+        try {
+            authServerProvider.close();
+            logger.debug("AuthServerProvider shut down");
+        } catch (RuntimeException exception) {
+            logger.error("AuthServerProvider shutdown failed", exception);
+        }
+    }
+
+    private void shutdownCleanupScheduler(ScheduledExecutorService scheduler, String schedulerName) {
+        if (scheduler == null) {
+            return;
+        }
+
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(CLEANUP_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                logger.warn("{} did not stop in time - forcing shutdown", schedulerName);
+                scheduler.shutdownNow();
+                if (!scheduler.awaitTermination(CLEANUP_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                    logger.warn("{} still running after forced shutdown", schedulerName);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            scheduler.shutdownNow();
+            logger.warn("Interrupted while stopping {}", schedulerName, e);
+        }
+
+        logger.debug("{} shut down", schedulerName);
+    }
+
+    private void logStartupInfo(long initializationDuration) {
+        if (logger.isInfoEnabled()) {
+            if (authServerProvider != null) {
+                logger.info("Auth server '{}' configured (mode={}, client compatibility={})",
+                        authServerProvider.serverName(),
+                        authServerProvider.mode().getConfigValue(),
+                        authServerProvider.compatibilityDescription());
+            } else {
+                logger.info("Auth server '{}' configured", settings.getAuthServerName());
+            }
+            String effectiveFloodgatePrefix = FloodgateDetector.getPlayerPrefix()
+                    .orElse(settings.getFloodgateUsernamePrefix());
+            logger.info("Floodgate support: {} (effective prefix='{}', auth bypass={})",
+                    settings.isFloodgateIntegrationEnabled() ? "enabled" : "disabled",
+                    effectiveFloodgatePrefix,
+                    settings.isFloodgateBypassAuthServerEnabled());
+            
+            String dbType = settings.getDatabaseStorageType();
+            String language = settings.getLanguage();
+            
+            logger.info("Initialized in {} ms ({} database, {} language, bStats integration {})",
+                    initializationDuration, dbType, language, metrics == null ? "unavailable" : "initialized");
+            logger.info("Ready - player connections allowed");
+        }
+    }
+
+    /**
+     * Przeładowuje konfigurację pluginu i pliki językowe.
+     *
+     * @return true jeśli sukces
+     */
+    public boolean reloadConfig() {
+        try {
+            if (logger.isInfoEnabled()) {
+                logger.info(messages.get("config.reloading"));
+            }
+
+            // Reload configuration
+            boolean configReloaded = settings.load();
+            
+            // Reload language files
+            boolean languageReloaded = reloadLanguageFiles();
+
+            if (configReloaded) {
+                if (logger.isInfoEnabled()) {
+                    logger.info(messages.get("config.reloaded_success"));
+                }
+                Set<String> pendingRestartChanges = settings.getPendingRestartChanges();
+                if (!pendingRestartChanges.isEmpty()) {
+                    logger.warn("Valid configuration changes pending a full restart: {}",
+                            String.join(", ", pendingRestartChanges));
+                }
+                logStartupInfo(0); // Pass 0 as duration for reload
+                return languageReloaded; // Return true only if both succeeded
+            } else {
+                if (logger.isErrorEnabled()) {
+                    logger.error(messages.get("config.reload_failed"));
+                }
+                return false;
+            }
+
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            // IllegalArgumentException can leak out if validation paths added in the future
+            // forget to be caught inside Settings.load(); IllegalStateException covers init-order races.
+            if (logger.isErrorEnabled()) {
+                logger.error("Configuration reload failed: {}", e.getMessage(), e);
+            }
+            return false;
+        }
+    }
+
+    // Gettery dla komponentów (dla innych klas)
+
+    /**
+     * Zwraca ProxyServer instance.
+     *
+     * @return ProxyServer
+     */
+    public ProxyServer getServer() {
+        return server;
+    }
+
+    /**
+     * Zwraca Logger instance.
+     *
+     * @return Logger
+     */
+    public Logger getLogger() {
+        return logger;
+    }
+
+    /**
+     * Zwraca katalog danych pluginu.
+     *
+     * @return Path do katalogu danych
+     */
+    public Path getDataDirectory() {
+        return dataDirectory;
+    }
+
+    /**
+     * Zwraca ustawienia pluginu.
+     *
+     * @return Settings
+     */
+    public Settings getSettings() {
+        return settings;
+    }
+
+    /**
+     * Zwraca system wiadomości (i18n).
+     *
+     * @return Messages
+     */
+    public Messages getMessages() {
+        return messages;
+    }
+
+    /**
+     * Zwraca manager bazy danych.
+     *
+     * @return DatabaseManager
+     */
+    public DatabaseManager getDatabaseManager() {
+        return databaseManager;
+    }
+
+    /**
+     * Zwraca cache autoryzacji.
+     *
+     * @return AuthCache
+     */
+    public AuthCache getAuthCache() {
+        return authCache;
+    }
+
+    /**
+     * Zwraca audit log service (zawsze ne-null po inicjalizacji,
+     * ale wewnętrznie no-op gdy wyłączony przez config).
+     *
+     * @return AuditLogService
+     */
+    public AuditLogService getAuditLogService() {
+        return auditLogService;
+    }
+
+    /**
+     * Zwraca connection manager.
+     *
+     * @return ConnectionManager
+     */
+    public ConnectionManager getConnectionManager() {
+        return connectionManager;
+    }
+
+    /**
+     * @return QQ binding / quick-login adapter, or {@code null} before the command layer starts
+     */
+    public QqAuthService getQqAuthService() {
+        return commandHandler != null ? commandHandler.getQqAuthService() : null;
+    }
+
+    /** @return concrete-player lifecycle generations used by listeners and command operations. */
+    public ConnectionLifecycleRegistry getConnectionLifecycleRegistry() {
+        return connectionLifecycleRegistry;
+    }
+
+    /** Returns the restart-scoped owner of the external or embedded auth-server topology. */
+    public AuthServerProvider getAuthServerProvider() {
+        return authServerProvider;
+    }
+
+    /**
+     * @return auth-server timeout scheduler (kicks players who linger unauthenticated)
+     */
+    public AuthTimeoutScheduler getAuthTimeoutScheduler() {
+        return authTimeoutScheduler;
+    }
+
+    /** @return shared RFC 6238 TOTP verifier (stateless). */
+    public TotpService getTotpService() {
+        return totpService;
+    }
+
+    /** @return store of in-flight 2FA verification states (post-BCrypt and pending /2fa setup). */
+    public PendingTotpStore getPendingTotpStore() {
+        return pendingTotpStore;
+    }
+
+    /** @return diagnostic report service for /vauth report (mclo.gs integration). */
+    public net.rafalohaki.veloauth.report.ReportService getReportService() {
+        return reportService;
+    }
+
+    /** @return per-player TOTP replay guard (RFC 6238 §5.2 — one-time-only enforcement). */
+    public TotpReplayGuard getTotpReplayGuard() {
+        return totpReplayGuard;
+    }
+
+    /**
+     * Sprawdza czy plugin jest zainicjalizowany.
+     *
+     * @return true jeśli zainicjalizowany
+     */
+    public boolean isInitialized() {
+        return initialized;
+    }
+
+    /**
+     * Returns the fully wired auth listener, or {@code null} until phase 8 of initialization
+     * has registered it. EarlyLoginBlocker delegates queued PreLogin events here, because a
+     * listener registered while an event dispatch is suspended never receives that event —
+     * Velocity snapshots the handler list at fire time.
+     */
+    public AuthListener getAuthListener() {
+        return authListener;
+    }
+
+    /**
+     * Returns a future that completes when the plugin is fully initialized.
+     * Used by EarlyLoginBlocker to queue connections during startup.
+     *
+     * @return CompletableFuture that completes on successful initialization
+     */
+    public CompletableFuture<Void> getInitializationFuture() {
+        return initializationFuture.copy();
+    }
+
+    /**
+     * Zwraca wersję pluginu.
+     *
+     * @return Wersja pluginu
+     */
+    public String getVersion() {
+        return BuildConstants.VERSION;
+    }
+}

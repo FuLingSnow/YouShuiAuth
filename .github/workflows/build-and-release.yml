@@ -1,0 +1,179 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and test
+        run: ./mvnw -B clean verify pmd:cpd-check
+
+      - name: Collect plugin jar
+        run: |
+          set -euo pipefail
+          cp target/YouShuiAuth-*.jar sbom-input.jar
+          cp target/veloauth-*.cdx.json sbom.cdx.json
+
+      - name: Upload plugin jar
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-jar
+          path: sbom-input.jar
+          if-no-files-found: error
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+
+  database-it:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: veloauth_it
+          POSTGRES_USER: veloauth_it
+          POSTGRES_PASSWORD: veloauth_it_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U veloauth_it -d veloauth_it"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: veloauth_it
+          MYSQL_USER: veloauth_it
+          MYSQL_PASSWORD: veloauth_it_password
+          MYSQL_ROOT_PASSWORD: veloauth_it_root_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uveloauth_it -pveloauth_it_password --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: PostgreSQL integration tests
+        run: |
+          set -euo pipefail
+          ./mvnw -B test \
+            -Dtest=PremiumUuidDaoPostgreSqlIT,JdbcAuthDaoDatabaseIT,DatabaseMigrationDatabaseIT \
+            -Dveloauth.postgres.url=jdbc:postgresql://127.0.0.1:5432/veloauth_it \
+            -Dveloauth.postgres.user=veloauth_it \
+            -Dveloauth.postgres.password=veloauth_it_password \
+            -Dveloauth.database.type=POSTGRESQL \
+            -Dveloauth.database.url='jdbc:postgresql://127.0.0.1:5432/veloauth_it?sslmode=disable' \
+            -Dveloauth.database.user=veloauth_it \
+            -Dveloauth.database.password=veloauth_it_password
+
+      - name: MySQL integration tests
+        run: |
+          set -euo pipefail
+          ./mvnw -B test \
+            -Dtest=JdbcAuthDaoDatabaseIT,DatabaseMigrationDatabaseIT \
+            -Dveloauth.database.type=MYSQL \
+            -Dveloauth.database.url='jdbc:mysql://127.0.0.1:3306/veloauth_it?useSSL=false&serverTimezone=UTC' \
+            -Dveloauth.database.user=veloauth_it \
+            -Dveloauth.database.password=veloauth_it_password
+
+  osv-scan:
+    needs: build
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
+    with:
+      download-artifact: sbom
+      scan-args: |-
+        --lockfile=sbom.cdx.json
+      fail-on-vuln: true
+      upload-sarif: false
+
+  release:
+    needs: [build, database-it]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download plugin jar
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v6.0.0
+        with:
+          name: plugin-jar
+          path: dist
+
+      - name: Publish versioned release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's:^[[:space:]]*<version>\(.*\)</version>[[:space:]]*$:\1:p' pom.xml | head -n1)"
+          [[ -n "${version}" ]] || { echo "Cannot resolve project version"; exit 1; }
+          tag="v${version}"
+          jar="YouShuiAuth-${version}.jar"
+          mkdir -p publish
+          cp dist/sbom-input.jar "publish/${jar}"
+          cp "publish/${jar}" publish/YouShuiAuth-latest.jar
+          ( cd publish
+            sha256sum "${jar}" > "${jar}.sha256"
+            sha256sum YouShuiAuth-latest.jar > YouShuiAuth-latest.jar.sha256 )
+          title="YouShuiAuth ${version}"
+          notes="$(printf '%s\n' \
+            "Release ${version}, built from the main branch." \
+            '' \
+            "- Commit: ${GITHUB_SHA}" \
+            "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '' \
+            "Verify the download with: sha256sum -c ${jar}.sha256")"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            ( cd publish && gh release upload "${tag}" "${jar}" "${jar}.sha256" \
+                YouShuiAuth-latest.jar YouShuiAuth-latest.jar.sha256 --clobber )
+            gh release edit "${tag}" --title "${title}" --notes "${notes}" --latest
+          else
+            ( cd publish && gh release create "${tag}" "${jar}" "${jar}.sha256" \
+                YouShuiAuth-latest.jar YouShuiAuth-latest.jar.sha256 \
+                --target "${GITHUB_SHA}" --title "${title}" --notes "${notes}" --latest )
+          fi

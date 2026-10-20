@@ -1,0 +1,235 @@
+package net.rafalohaki.veloauth.connection;
+
+import com.velocitypowered.api.proxy.Player;
+import com.velocitypowered.api.scheduler.ScheduledTask;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.rafalohaki.veloauth.VeloAuth;
+import net.rafalohaki.veloauth.cache.AuthCache;
+import net.rafalohaki.veloauth.config.Settings;
+import net.rafalohaki.veloauth.i18n.Messages;
+import net.rafalohaki.veloauth.util.PlayerAddressUtils;
+import static net.rafalohaki.veloauth.util.PlayerMessages.playerMessage;
+import org.slf4j.Logger;
+import org.slf4j.Marker;
+import org.slf4j.MarkerFactory;
+
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+
+/**
+ * Disconnects players who linger on the auth server without authenticating within
+ * {@code auth-server.timeout-seconds}.
+ * <p>
+ * Lifecycle:
+ * <ul>
+ *   <li>{@link #schedule(Player)} — called from {@code AuthListener.handleAuthServerConnection}
+ *       when an unauthenticated player lands on the auth server.</li>
+ *   <li>{@link #cancel(UUID)} — called on successful auth (PostAuthFlow) and on disconnect.</li>
+ *   <li>{@link #shutdown()} — called from {@code VeloAuth.shutdown()}; cancels all pending tasks.</li>
+ * </ul>
+ * <p>
+ * Thread-safe: state held in {@link ConcurrentHashMap}; scheduled tasks run on Velocity's
+ * scheduler thread, so {@code player.disconnect(...)} is invoked on a safe thread.
+ */
+public final class AuthTimeoutScheduler {
+
+    private static final Marker AUTH_MARKER = MarkerFactory.getMarker("AUTH");
+
+    /**
+     * How often the login/register reminder repeats. The one-shot prompt from
+     * {@code AuthListener.sendAuthInstructions} can be lost on the initial join
+     * (see issue #48); this cadence keeps the player informed without spamming
+     * within the default 300s auth timeout window.
+     */
+    private static final int REMINDER_INTERVAL_SECONDS = 10;
+    /**
+     * The one-shot prompt sent from {@code ServerConnectedEvent} is frequently dropped because
+     * the client is still finishing the join screen. Send the first reminder almost immediately
+     * (after the world is visible) and then keep the normal cadence.
+     */
+    private static final int INITIAL_REMINDER_DELAY_SECONDS = 1;
+    private static final String GENERIC_PROMPT_KEY = "auth.prompt.generic";
+
+    private final VeloAuth plugin;
+    private final Settings settings;
+    private final Messages messages;
+    private final AuthCache authCache;
+    private final ConnectionManager connectionManager;
+    private final Logger logger;
+    private final ConcurrentMap<UUID, ScheduledTask> pending = new ConcurrentHashMap<>();
+    private final ConcurrentMap<UUID, ScheduledTask> reminders = new ConcurrentHashMap<>();
+    /** Account-status-aware reminder content, filled in by AuthListener once the nickname
+     *  lookup resolves; absent entry means "status unknown — use the generic prompt". */
+    private final ConcurrentMap<UUID, ReminderPrompt> reminderPrompts = new ConcurrentHashMap<>();
+    private final ReentrantLock lifecycleLock = new ReentrantLock();
+    private final AtomicBoolean closed = new AtomicBoolean();
+
+    public AuthTimeoutScheduler(VeloAuth plugin, Settings settings, Messages messages,
+                                AuthCache authCache, ConnectionManager connectionManager) {
+        this.plugin = plugin;
+        this.settings = settings;
+        this.messages = messages;
+        this.authCache = authCache;
+        this.connectionManager = connectionManager;
+        this.logger = plugin.getLogger();
+    }
+
+    /**
+     * Schedules the repeating login/register reminder and (when enabled) a kick for the given
+     * player after {@code auth-server.timeout-seconds}. The reminder is the safety net for a
+     * lost one-shot auth prompt: it repeats until the player authenticates, leaves the auth
+     * server, or disconnects. Any previously scheduled tasks for the same UUID are cancelled
+     * first.
+     */
+    public void schedule(Player player) {
+        int seconds = settings.getAuthServerTimeoutSeconds();
+        UUID uuid = player.getUniqueId();
+
+        lifecycleLock.lock();
+        try {
+            if (closed.get()) {
+                return;
+            }
+            scheduleReminderLocked(player, uuid);
+            if (seconds > 0) {
+                scheduleKickLocked(player, uuid, seconds);
+            }
+        } finally {
+            lifecycleLock.unlock();
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug(AUTH_MARKER, "Auth timeout scheduled for {} ({}s)",
+                    player.getUsername(), seconds);
+        }
+    }
+
+    private void scheduleKickLocked(Player player, UUID uuid, int seconds) {
+        ScheduledTaskRegistry.replace(pending, uuid, callback ->
+                plugin.getServer().getScheduler().buildTask(plugin, callback)
+                        .delay(seconds, TimeUnit.SECONDS)
+                        .schedule(), () -> {
+            if (closed.get() || !player.isActive()) {
+                return;
+            }
+            // Re-check: maybe player authenticated in the meantime but cancel() didn't fire
+            // (e.g. external session restore). Verify against cache + current server.
+            if (isAuthorizedAndStillOnAuthServer(player)) {
+                return;
+            }
+            if (!connectionManager.isPlayerOnAuthServer(player)) {
+                return; // already moved on, nothing to do
+            }
+
+            player.disconnect(playerMessage(player, settings, messages, "auth.timeout.kick", NamedTextColor.RED, seconds));
+            if (logger.isInfoEnabled()) {
+                logger.info(AUTH_MARKER,
+                        "Kicked player {} after {}s auth timeout (no login/register)",
+                        player.getUsername(), seconds);
+            }
+        });
+    }
+
+    private void scheduleReminderLocked(Player player, UUID uuid) {
+        ScheduledTask task = plugin.getServer().getScheduler()
+                .buildTask(plugin, (Consumer<ScheduledTask>) self -> runReminder(player, self))
+                .delay(INITIAL_REMINDER_DELAY_SECONDS, TimeUnit.SECONDS)
+                .repeat(REMINDER_INTERVAL_SECONDS, TimeUnit.SECONDS)
+                .schedule();
+        ScheduledTask previous = reminders.put(uuid, task);
+        if (previous != null) {
+            previous.cancel();
+        }
+    }
+
+    private void runReminder(Player player, ScheduledTask self) {
+        if (closed.get() || !player.isActive()
+                || isAuthorizedAndStillOnAuthServer(player)
+                || !connectionManager.isPlayerOnAuthServer(player)) {
+            reminders.remove(player.getUniqueId(), self);
+            reminderPrompts.remove(player.getUniqueId());
+            self.cancel();
+            return;
+        }
+        ReminderPrompt prompt = reminderPrompts.getOrDefault(player.getUniqueId(), ReminderPrompt.GENERIC);
+        Component message = playerMessage(player, settings, messages, prompt.key(), prompt.color());
+        if (prompt.command() != null) {
+            message = message.append(Component.space()).append(buttonFor(prompt.command()));
+        }
+        player.sendMessage(message);
+    }
+
+    private Component buttonFor(String command) {
+        String labelKey = "/qqbind".equals(command) ? "auth.button.qqbind" : "auth.button.login";
+        return messages.component(labelKey, NamedTextColor.AQUA)
+                .clickEvent(ClickEvent.runCommand(command));
+    }
+
+    /**
+     * Switches the repeating reminder to the account-status-specific prompt (issue #54).
+     * Ignored when no timeout is armed for the player, so a lookup finishing after
+     * disconnect cannot leave a stale entry behind.
+     */
+    public void useReminderPrompt(UUID uuid, String key, NamedTextColor color) {
+        useReminderPrompt(uuid, key, color, null);
+    }
+
+    /**
+     * Same as {@link #useReminderPrompt(UUID, String, NamedTextColor)} but also renders a
+     * clickable button that executes {@code command}.
+     */
+    public void useReminderPrompt(UUID uuid, String key, NamedTextColor color, String command) {
+        if (uuid == null || key == null) {
+            return;
+        }
+        if (pending.containsKey(uuid) || reminders.containsKey(uuid)) {
+            reminderPrompts.put(uuid, new ReminderPrompt(key, color, command));
+        }
+    }
+
+    private boolean isAuthorizedAndStillOnAuthServer(Player player) {
+        // If the cache says the player is authorized for their current IP, they have authenticated
+        // — the cancel() call must have raced with the scheduler. Skip the kick.
+        // An expired session means the player must log in again, so reminders and the kick
+        // still apply despite a surviving authorization entry.
+        String ip = PlayerAddressUtils.getPlayerIp(player);
+        return authCache.isPlayerAuthorized(player.getUniqueId(), ip)
+                && authCache.hasActiveSession(player.getUniqueId(), player.getUsername(), ip);
+    }
+
+    /**
+     * Cancels a scheduled timeout. Called on successful authentication or disconnect.
+     */
+    public void cancel(UUID uuid) {
+        ScheduledTaskRegistry.cancel(pending, uuid);
+        ScheduledTaskRegistry.cancel(reminders, uuid);
+        reminderPrompts.remove(uuid);
+    }
+
+    /**
+     * Cancels every pending timeout. Called during plugin shutdown.
+     */
+    public void shutdown() {
+        lifecycleLock.lock();
+        try {
+            if (closed.compareAndSet(false, true)) {
+                ScheduledTaskRegistry.cancelAll(pending);
+                ScheduledTaskRegistry.cancelAll(reminders);
+                reminderPrompts.clear();
+            }
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    private record ReminderPrompt(String key, NamedTextColor color, String command) {
+        private static final ReminderPrompt GENERIC =
+                new ReminderPrompt(GENERIC_PROMPT_KEY, NamedTextColor.YELLOW, null);
+    }
+}
