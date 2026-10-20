@@ -161,12 +161,18 @@ jobs:
             sha256sum "${jar}" > "${jar}.sha256"
             sha256sum YouShuiAuth-latest.jar > YouShuiAuth-latest.jar.sha256 )
           title="YouShuiAuth ${version}"
-          notes="$(printf '%s\n' \
-            "Release ${version}, built from the main branch." \
-            '' \
+          changelog="$(awk -v header="## v${version}" '
+            $0 == header { inside = 1; next }
+            inside && /^## v/ { exit }
+            inside { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' | tac | sed -e '/./,$!d' | tac)"
+          if [ -z "${changelog}" ]; then
+            changelog="Release ${version}, built from the main branch."
+          fi
+          notes="$(printf '%s\n\n---\n\n%s\n%s\n\n%s\n' \
+            "${changelog}" \
             "- Commit: ${GITHUB_SHA}" \
             "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '' \
             "Verify the download with: sha256sum -c ${jar}.sha256")"
           if gh release view "${tag}" >/dev/null 2>&1; then
             ( cd publish && gh release upload "${tag}" "${jar}" "${jar}.sha256" \
