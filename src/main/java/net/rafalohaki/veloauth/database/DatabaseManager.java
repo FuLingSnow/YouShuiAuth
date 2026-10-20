@@ -25,6 +25,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -77,6 +78,10 @@ public class DatabaseManager {
     private static final String DATABASE_NOT_CONNECTED = "Database not connected";
     private static final String EXECUTOR_SHUTTING_DOWN = ": Executor is shutting down";
     private static final long FAIL_SECURE_IP_REGISTRATION_COUNT = Long.MAX_VALUE;
+
+    /** Per-database initialization locks; separate databases still initialize in parallel. */
+    private static final ConcurrentHashMap<String, ReentrantLock> INITIALIZATION_LOCKS =
+            new ConcurrentHashMap<>();
 
     /** Bounded read-through cache for AUTH rows — caps memory on servers with large
      *  player tables (a plain map grew one entry per unique nickname, forever). */
@@ -198,20 +203,31 @@ public class DatabaseManager {
             return true;
         }
 
-        initializeConnection();
-        initializeDaos();
-        DatabaseMigrationService.MigrationResult migrationResult = migrationService.createTablesAndMigrate(connectionSource,
-                messages.get("database.manager.creating_tables"),
-                messages.get("database.manager.tables_created"));
-        logger.info(DB_MARKER, "VA-1501 legacy UUID preservation candidates={}, marked={}",
-                migrationResult.legacyUuidCandidates(), migrationResult.legacyUuidRowsMarked());
-        recordRequiredSchemaVersion(1, "baseline v1.2.0 schema");
-        recordRequiredSchemaVersion(2, "VA-1501 legacy UUID preservation backfill");
-        recordRequiredSchemaVersion(3, "QQ binding, link-code and remember-token tables");
-        markAsConnected();
-        healthCheck.start();
-
-        return true;
+        // Two managers on one host may target the same database; H2 is not safe for concurrent
+        // DDL on a single database, so initialization is serialized per JDBC URL in this JVM.
+        ReentrantLock initLock = INITIALIZATION_LOCKS.computeIfAbsent(
+                config.getJdbcUrl(), url -> new ReentrantLock());
+        initLock.lock();
+        try {
+            if (isAlreadyConnected()) {
+                return true;
+            }
+            initializeConnection();
+            initializeDaos();
+            DatabaseMigrationService.MigrationResult migrationResult = migrationService.createTablesAndMigrate(connectionSource,
+                    messages.get("database.manager.creating_tables"),
+                    messages.get("database.manager.tables_created"));
+            logger.info(DB_MARKER, "VA-1501 legacy UUID preservation candidates={}, marked={}",
+                    migrationResult.legacyUuidCandidates(), migrationResult.legacyUuidRowsMarked());
+            recordRequiredSchemaVersion(1, "baseline v1.2.0 schema");
+            recordRequiredSchemaVersion(2, "VA-1501 legacy UUID preservation backfill");
+            recordRequiredSchemaVersion(3, "QQ binding, link-code and remember-token tables");
+            markAsConnected();
+            healthCheck.start();
+            return true;
+        } finally {
+            initLock.unlock();
+        }
     }
 
     private boolean isAlreadyConnected() {
