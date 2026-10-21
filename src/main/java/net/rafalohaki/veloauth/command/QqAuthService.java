@@ -125,17 +125,9 @@ public class QqAuthService implements QqAuthBridge {
 
         boolean registration = false;
         if (!isAuthenticatedForBinding(player)) {
-            // A nickname alone must not be enough to take over an existing account:
-            // registration requires that no AUTH row exists yet.
-            if (!plugin.getConnectionManager().isPlayerOnAuthServer(player)) {
-                return new BindCodeIssue(QqResult.NOT_AUTHENTICATED, null, 0, false);
-            }
-            Boolean exists = accountExists(player);
-            if (exists == null) {
-                return new BindCodeIssue(QqResult.ERROR, null, 0, false);
-            }
-            if (exists) {
-                return new BindCodeIssue(QqResult.ACCOUNT_EXISTS, null, 0, false);
+            QqResult gate = registrationGate(player);
+            if (gate != null) {
+                return new BindCodeIssue(gate, null, 0, false);
             }
             registration = true;
         }
@@ -281,7 +273,12 @@ public class QqAuthService implements QqAuthBridge {
             return QqResult.ERROR;
         }
         if (exists) {
-            return QqResult.ACCOUNT_EXISTS;
+            if (!isOrphanedQqOnlyAccount(player)) {
+                return QqResult.ACCOUNT_EXISTS;
+            }
+            if (!deleteStaleQqOnlyAccount(player)) {
+                return QqResult.ERROR;
+            }
         }
 
         try {
@@ -338,12 +335,70 @@ public class QqAuthService implements QqAuthBridge {
         }
     }
 
+    /**
+     * A nickname alone must not be enough to take over an existing account: registration needs
+     * no AUTH row, unless the row is a passwordless QQ account whose binding disappeared.
+     *
+     * @return rejection reason, or {@code null} when registration may proceed
+     */
+    private QqResult registrationGate(Player player) {
+        if (!plugin.getConnectionManager().isPlayerOnAuthServer(player)) {
+            return QqResult.NOT_AUTHENTICATED;
+        }
+        Boolean exists = accountExists(player);
+        if (exists == null) {
+            return QqResult.ERROR;
+        }
+        if (exists && !isOrphanedQqOnlyAccount(player)) {
+            return QqResult.ACCOUNT_EXISTS;
+        }
+        if (exists && logger.isInfoEnabled()) {
+            logger.info(SECURITY_MARKER,
+                    "Re-registration allowed for orphaned QQ-only account {}",
+                    player.getUsername());
+        }
+        return null;
+    }
+
     private Boolean accountExists(Player player) {
         var result = ctx.databaseManager().findPlayerByNickname(player.getUsername()).join();
         if (result == null || result.isDatabaseError()) {
             return null;
         }
         return result.getValue() != null;
+    }
+
+    /**
+     * A passwordless QQ account whose binding is gone can never authenticate again, so it is
+     * treated as unregistered: the owner may register the nickname once more.
+     */
+    public boolean isOrphanedQqOnlyAccount(Player player) {
+        if (!isEnabled() || player == null) {
+            return false;
+        }
+        RegisteredPlayer account = loadRegisteredPlayer(player);
+        if (account == null || !QQ_ONLY_HASH.equals(account.getHash())) {
+            return false;
+        }
+        try {
+            return dao().findByUuid(PLATFORM_QQ, player.getUniqueId().toString()).isEmpty();
+        } catch (SQLException e) {
+            logger.error(SECURITY_MARKER, "Failed to inspect QQ binding for {}",
+                    player.getUsername(), e);
+            return false;
+        }
+    }
+
+    private boolean deleteStaleQqOnlyAccount(Player player) {
+        String nickname = player.getUsername();
+        var result = ctx.databaseManager().deletePlayer(nickname).join();
+        if (result == null || result.isDatabaseError() || !Boolean.TRUE.equals(result.getValue())) {
+            logger.error(SECURITY_MARKER, "Failed to remove orphaned QQ account {}", nickname);
+            return false;
+        }
+        revokeRememberTokens(player.getUniqueId());
+        audit(AuditEventType.QQ_UNBIND, nickname, "orphaned-replaced");
+        return true;
     }
 
     @Override

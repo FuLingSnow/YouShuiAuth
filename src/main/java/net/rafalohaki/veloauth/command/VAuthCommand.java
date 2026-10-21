@@ -12,6 +12,7 @@ import net.rafalohaki.veloauth.util.PlayerAddressUtils;
 
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import net.rafalohaki.veloauth.database.DatabaseManager;
@@ -30,6 +31,12 @@ class VAuthCommand implements SimpleCommand {
     private static final String RELOAD_WARNING_KEY = "admin.reload.pending_restart";
     private static final Marker DB_MARKER = MarkerFactory.getMarker("DATABASE");
     private static final Marker AUTH_MARKER = MarkerFactory.getMarker("AUTH");
+
+    private static final String SUBCOMMAND_QQ = "qq";
+    private static final List<String> TOP_LEVEL_SUBCOMMANDS = List.of(
+            "reload", "cache-reset", "stats", "conflicts", "2fa-remove", SUBCOMMAND_QQ, "report");
+    private static final List<String> QQ_SUBCOMMANDS = List.of("list", "unbind", "reset");
+    private static final List<String> PLAYER_ARG_SUBCOMMANDS = List.of("2fa-remove", "cache-reset");
 
     private final CommandContext ctx;
 
@@ -380,6 +387,7 @@ class VAuthCommand implements SimpleCommand {
         source.sendMessage(ctx.messages().component("admin.help.cache", NamedTextColor.YELLOW));
         source.sendMessage(ctx.messages().component("admin.help.stats", NamedTextColor.YELLOW));
         source.sendMessage(ctx.messages().component("admin.help.conflicts", NamedTextColor.YELLOW));
+        source.sendMessage(ctx.messages().component("admin.help.qq", NamedTextColor.YELLOW));
         source.sendMessage(ctx.messages().component("admin.help.2fa_remove", NamedTextColor.YELLOW));
         source.sendMessage(ctx.messages().component("admin.help.report", NamedTextColor.YELLOW));
     }
@@ -387,12 +395,39 @@ class VAuthCommand implements SimpleCommand {
     @Override
     public List<String> suggest(Invocation invocation) {
         String[] args = invocation.arguments();
-
-        if (args.length == 1) {
-            return List.of("reload", "cache-reset", "stats", "conflicts", "2fa-remove", "report");
+        if (args.length <= 1) {
+            return matching(TOP_LEVEL_SUBCOMMANDS, args.length == 1 ? args[0] : "");
         }
-
+        String subcommand = args[0].toLowerCase(Locale.ROOT);
+        if (SUBCOMMAND_QQ.equals(subcommand)) {
+            if (args.length == 2) {
+                return matching(QQ_SUBCOMMANDS, args[1]);
+            }
+            if (args.length == 3 && isQqTargetSubcommand(args[1])) {
+                return matching(onlinePlayerNames(), args[2]);
+            }
+            return List.of();
+        }
+        if (args.length == 2 && PLAYER_ARG_SUBCOMMANDS.contains(subcommand)) {
+            return matching(onlinePlayerNames(), args[1]);
+        }
         return List.of();
+    }
+
+    private static boolean isQqTargetSubcommand(String value) {
+        return "unbind".equalsIgnoreCase(value) || "reset".equalsIgnoreCase(value);
+    }
+
+    private static List<String> matching(List<String> options, String prefix) {
+        String normalized = prefix.toLowerCase(Locale.ROOT);
+        return options.stream().filter(option -> option.startsWith(normalized)).toList();
+    }
+
+    private List<String> onlinePlayerNames() {
+        return ctx.plugin().getServer().getAllPlayers().stream()
+                .map(Player::getUsername)
+                .sorted()
+                .toList();
     }
 
     private void processConflictsCommand(CommandSource source) {

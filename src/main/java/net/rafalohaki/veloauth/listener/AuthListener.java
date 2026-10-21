@@ -1363,8 +1363,13 @@ public class AuthListener {
         }
 
         databaseManager.findPlayerByNickname(username.get())
-                .thenAccept(dbResult -> connectionLifecycleRegistry.runIfCurrent(operation,
-                        () -> sendAuthPrompt(player, dbResult)))
+                .thenAccept(dbResult -> {
+                    QqAuthService qqService = plugin.getQqAuthService();
+                    boolean orphanedQqOnly = qqService != null
+                            && qqService.isOrphanedQqOnlyAccount(player);
+                    connectionLifecycleRegistry.runIfCurrent(operation,
+                            () -> sendAuthPrompt(player, dbResult, orphanedQqOnly));
+                })
                 .exceptionally(e -> {
                     logger.error("Error sending auth prompt for {}", username.get(), e);
                     // Do not send a second copy immediately: the 1s reminder is the single
@@ -1377,7 +1382,8 @@ public class AuthListener {
                 });
     }
 
-    private void sendAuthPrompt(Player player, DbResult<RegisteredPlayer> dbResult) {
+    private void sendAuthPrompt(Player player, DbResult<RegisteredPlayer> dbResult,
+            boolean orphanedQqOnly) {
         if (dbResult.isDatabaseError()) {
             // Only update the reminder; the 1s reminder performs the actual delivery so the
             // player does not receive an immediate copy plus a second copy one second later.
@@ -1387,6 +1393,11 @@ public class AuthListener {
         }
 
         RegisteredPlayer registeredPlayer = dbResult.getValue();
+        if (registeredPlayer != null && orphanedQqOnly) {
+            plugin.getAuthTimeoutScheduler().useReminderPrompt(player.getUniqueId(),
+                    "auth.stale_qq_account", NamedTextColor.GREEN, "/qqbind");
+            return;
+        }
         if (registeredPlayer != null) {
             boolean qqOnly = QqAuthService.QQ_ONLY_HASH.equals(registeredPlayer.getHash());
             String promptKey = qqOnly ? "auth.account_exists_qq" : "auth.account_exists";

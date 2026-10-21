@@ -19,6 +19,7 @@ import org.slf4j.MarkerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.sql.SQLTransientConnectionException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -82,6 +83,9 @@ public class DatabaseManager {
     /** Per-database initialization locks; separate databases still initialize in parallel. */
     private static final ConcurrentHashMap<String, ReentrantLock> INITIALIZATION_LOCKS =
             new ConcurrentHashMap<>();
+
+    private static final int INIT_MAX_ATTEMPTS = 4;
+    private static final long INIT_RETRY_BASE_DELAY_MS = 2_000L;
 
     /** Bounded read-through cache for AUTH rows — caps memory on servers with large
      *  player tables (a plain map grew one entry per unique nickname, forever). */
@@ -185,17 +189,76 @@ public class DatabaseManager {
                     }
                     return false;
                 }
-                return performDatabaseInitialization();
-            } catch (SQLException e) {
-                if (logger.isErrorEnabled()) {
-                    logger.error(DB_MARKER, "Error during database initialization", e);
-                }
-                return false;
+                return initializeWithRetry();
             } finally {
                 lifecycleLock.unlock();
                 initializing.set(false);
             }
         }, dbExecutor);
+    }
+
+    /**
+     * A restart can race with the previous instance's pool still draining, so PostgreSQL briefly
+     * answers "remaining connection slots are reserved". Retrying avoids needing a database restart.
+     */
+    private boolean initializeWithRetry() {
+        for (int attempt = 1; attempt <= INIT_MAX_ATTEMPTS; attempt++) {
+            try {
+                return performDatabaseInitialization();
+            } catch (SQLException e) {
+                closeConnectionResources();
+                if (closed) {
+                    logger.warn(DB_MARKER, "Database initialization aborted by shutdown");
+                    return false;
+                }
+                if (attempt == INIT_MAX_ATTEMPTS || !isConnectionExhausted(e)) {
+                    if (logger.isErrorEnabled()) {
+                        logger.error(DB_MARKER, "Error during database initialization", e);
+                    }
+                    return false;
+                }
+                long delay = INIT_RETRY_BASE_DELAY_MS * attempt;
+                logger.warn(DB_MARKER, "Database refused connections ({}); retry {}/{} in {} ms",
+                        deepestMessage(e), attempt, INIT_MAX_ATTEMPTS, delay);
+                if (!sleepBeforeRetry(delay)) {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean sleepBeforeRetry(long delayMillis) {
+        try {
+            Thread.sleep(delayMillis);
+            return !closed;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private static boolean isConnectionExhausted(SQLException failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLTransientConnectionException) {
+                return true;
+            }
+            String message = cause.getMessage();
+            if (message != null && (message.contains("remaining connection slots")
+                    || message.contains("too many clients"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String deepestMessage(SQLException failure) {
+        Throwable deepest = failure;
+        while (deepest.getCause() != null) {
+            deepest = deepest.getCause();
+        }
+        String message = deepest.getMessage();
+        return message == null ? deepest.getClass().getSimpleName() : message;
     }
 
     private boolean performDatabaseInitialization() throws SQLException {
