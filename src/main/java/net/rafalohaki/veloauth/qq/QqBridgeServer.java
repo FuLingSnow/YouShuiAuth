@@ -51,6 +51,8 @@ public final class QqBridgeServer implements AutoCloseable {
     private static final String CONTENT_TYPE_JSON = "application/json; charset=utf-8";
     private static final String PATH_BIND = "/internal/qq/bind";
     private static final String PATH_CONFIRM_LOGIN = "/internal/qq/confirm-login";
+    private static final String PATH_DEVICE_APPROVAL = "/internal/qq/device-approval";
+    private static final String PATH_STOP_AUTO_LOGIN = "/internal/qq/stop-auto-login";
     private static final String PATH_NOTIFY = "/internal/qq/notify";
     private static final int MAX_BODY_BYTES = 4096;
     private static final long MAX_CLOCK_SKEW_SECONDS = 300;
@@ -110,6 +112,8 @@ public final class QqBridgeServer implements AutoCloseable {
             candidate.createContext(PATH_CONFIRM_LOGIN, exchange -> handle(exchange,
                     (platform, groupId, qqId, code, nickname) ->
                             bridge.confirmLogin(platform, groupId, qqId, code)));
+            candidate.createContext(PATH_DEVICE_APPROVAL, this::handleDeviceApproval);
+            candidate.createContext(PATH_STOP_AUTO_LOGIN, this::handleStopAutoLogin);
             candidate.createContext(PATH_NOTIFY, this::handleNotify);
             candidate.setExecutor(candidateExecutor);
             candidate.start();
@@ -143,57 +147,146 @@ public final class QqBridgeServer implements AutoCloseable {
     }
 
     private void handle(HttpExchange exchange, RequestHandler handler) throws IOException {
+        runEndpoint(exchange, "bridge", target -> handleRequest(target, handler));
+    }
+
+    /**
+     * Wraps one endpoint body so every handler shares the same close-on-finish and
+     * unexpected-error behaviour.
+     */
+    private void runEndpoint(HttpExchange exchange, String description, EndpointHandler handler)
+            throws IOException {
         try (exchange) {
             try {
-                handleRequest(exchange, handler);
+                handler.handle(exchange);
             } catch (RuntimeException e) {
-                logger.error("Unexpected error handling QQ bridge request", e);
+                logger.error("Unexpected error handling QQ {} request", description, e);
                 writeJson(exchange, HTTP_INTERNAL_ERROR, "error", false);
             }
         }
     }
 
     private void handleRequest(HttpExchange exchange, RequestHandler handler) throws IOException {
+        Envelope envelope = verifyEnvelope(exchange);
+        if (envelope == null) {
+            return;
+        }
+        String code = stringOr(envelope.json(), "code", "");
+        if (code.isBlank()) {
+            writeJson(exchange, HTTP_BAD_REQUEST, "bad_request", false);
+            return;
+        }
+        writeResult(exchange, handler.handle(envelope.platform(), envelope.groupId(),
+                envelope.qqId(), code, stringOr(envelope.json(), "nickname", "")));
+    }
+
+    /**
+     * Applies the checks every signed POST endpoint shares: method, signature, identity fields,
+     * group allow-list and per-QQ rate limit.
+     *
+     * @return the verified envelope, or {@code null} after an error response was written
+     */
+    private Envelope verifyEnvelope(HttpExchange exchange) throws IOException {
+        JsonObject json = readVerifiedJson(exchange);
+        if (json == null) {
+            return null;
+        }
+        String platform = stringOr(json, "platform", "qq");
+        String groupId = stringOr(json, "groupId", "");
+        String qqId = stringOr(json, "qqId", "");
+        if (groupId.isBlank() || qqId.isBlank()) {
+            writeJson(exchange, HTTP_BAD_REQUEST, "bad_request", false);
+            return null;
+        }
+        if (!isGroupAllowed(groupId)) {
+            writeResult(exchange, QqResult.GROUP_NOT_ALLOWED);
+            return null;
+        }
+        if (!allowAttempt(platform, qqId)) {
+            writeResult(exchange, QqResult.RATE_LIMITED);
+            return null;
+        }
+        return new Envelope(json, platform, groupId, qqId);
+    }
+
+    /** Verified request identity shared by the signed POST endpoints. */
+    private record Envelope(JsonObject json, String platform, String groupId, String qqId) {
+    }
+
+    /**
+     * Validates the transport envelope shared by every signed POST endpoint.
+     *
+     * @return the parsed JSON body, or {@code null} after an error response was written
+     */
+    private JsonObject readVerifiedJson(HttpExchange exchange) throws IOException {
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
             writeJson(exchange, HTTP_METHOD_NOT_ALLOWED, "method_not_allowed", false);
-            return;
+            return null;
         }
         byte[] body = readBody(exchange.getRequestBody());
         if (body.length == 0) {
             writeJson(exchange, HTTP_BAD_REQUEST, "bad_request", false);
-            return;
+            return null;
         }
         if (!verifySignature(exchange, body)) {
             logger.warn(SECURITY_MARKER, "Rejected QQ bridge request with invalid signature");
             writeJson(exchange, HTTP_UNAUTHORIZED, "unauthorized", false);
-            return;
+            return null;
         }
-
         JsonObject json = parseObject(body);
         if (json == null) {
             writeJson(exchange, HTTP_BAD_REQUEST, "bad_request", false);
+        }
+        return json;
+    }
+
+    /**
+     * POST {@code /internal/qq/device-approval}: applies the group reply for a pending
+     * new-device login. Body: {@code platform, groupId, qqId, decision, approvalId} where
+     * {@code approvalId} comes from the approval notification and {@code qqId} is the replier.
+     */
+    private void handleDeviceApproval(HttpExchange exchange) throws IOException {
+        runEndpoint(exchange, "device approval", this::handleDeviceApprovalRequest);
+    }
+
+    private void handleDeviceApprovalRequest(HttpExchange exchange) throws IOException {
+        Envelope envelope = verifyEnvelope(exchange);
+        if (envelope == null) {
             return;
         }
-
-        String platform = stringOr(json, "platform", "qq");
-        String groupId = stringOr(json, "groupId", "");
-        String qqId = stringOr(json, "qqId", "");
-        String code = stringOr(json, "code", "");
-        String nickname = stringOr(json, "nickname", "");
-        if (groupId.isBlank() || qqId.isBlank() || code.isBlank()) {
+        String decision = stringOr(envelope.json(), "decision",
+                stringOr(envelope.json(), "code", ""));
+        String approvalId = stringOr(envelope.json(), "approvalId", "");
+        if (decision.isBlank() || approvalId.isBlank()) {
             writeJson(exchange, HTTP_BAD_REQUEST, "bad_request", false);
             return;
         }
-        if (!isGroupAllowed(groupId)) {
-            writeResult(exchange, QqResult.GROUP_NOT_ALLOWED);
-            return;
-        }
-        if (!allowAttempt(platform, qqId)) {
-            writeResult(exchange, QqResult.RATE_LIMITED);
-            return;
-        }
+        writeResult(exchange, bridge.decideDeviceApproval(envelope.platform(),
+                envelope.groupId(), envelope.qqId(), decision, approvalId));
+    }
 
-        writeResult(exchange, handler.handle(platform, groupId, qqId, code, nickname));
+    /**
+     * POST {@code /internal/qq/stop-auto-login}: applies the quote-reply {@code 阻止} for a
+     * cookie auto-login notification. Body: {@code platform, groupId, qqId, stopId} where
+     * {@code stopId} comes from the notification and {@code qqId} is the replier.
+     */
+    private void handleStopAutoLogin(HttpExchange exchange) throws IOException {
+        runEndpoint(exchange, "stop-auto-login", this::handleStopAutoLoginRequest);
+    }
+
+    private void handleStopAutoLoginRequest(HttpExchange exchange) throws IOException {
+        Envelope envelope = verifyEnvelope(exchange);
+        if (envelope == null) {
+            return;
+        }
+        String stopId = stringOr(envelope.json(), "stopId",
+                stringOr(envelope.json(), "approvalId", ""));
+        if (stopId.isBlank()) {
+            writeJson(exchange, HTTP_BAD_REQUEST, "bad_request", false);
+            return;
+        }
+        writeResult(exchange, bridge.stopAutoLogin(envelope.platform(), envelope.groupId(),
+                envelope.qqId(), stopId));
     }
 
     /**
@@ -226,6 +319,10 @@ public final class QqBridgeServer implements AutoCloseable {
             JsonObject item = new JsonObject();
             item.addProperty("qqId", notify.qqId());
             item.addProperty("message", notify.message());
+            item.addProperty("type", notify.type());
+            if (notify.approvalId() != null) {
+                item.addProperty("approvalId", notify.approvalId());
+            }
             items.add(item);
         }
         JsonObject response = new JsonObject();
@@ -360,5 +457,10 @@ public final class QqBridgeServer implements AutoCloseable {
     @FunctionalInterface
     private interface RequestHandler {
         QqResult handle(String platform, String groupId, String qqId, String code, String nickname);
+    }
+
+    @FunctionalInterface
+    private interface EndpointHandler {
+        void handle(HttpExchange exchange) throws IOException;
     }
 }

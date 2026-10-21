@@ -70,6 +70,39 @@ public final class DeviceFingerprints {
     }
 
     /**
+     * Masks an address for chat/QQ output: IPv4 keeps the /24 prefix, IPv6 keeps the /64 prefix.
+     * Unparseable input never leaks the raw value.
+     *
+     * @param ip remote address
+     * @return masked prefix such as {@code 1.2.3.x}, {@code 2001:db8:1:2::/64} or {@code unknown}
+     */
+    public static String subnetLabel(String ip) {
+        if (ip == null || ip.isBlank()) {
+            return "unknown";
+        }
+        try {
+            InetAddress address = InetAddress.getByName(ip);
+            byte[] raw = address.getAddress();
+            if (address instanceof Inet4Address) {
+                return (raw[0] & 0xFF) + "." + (raw[1] & 0xFF) + "." + (raw[2] & 0xFF) + ".x";
+            }
+            if (address instanceof Inet6Address) {
+                StringBuilder builder = new StringBuilder(24);
+                for (int i = 0; i < 8; i += 2) {
+                    if (i > 0) {
+                        builder.append(':');
+                    }
+                    builder.append(Integer.toHexString(((raw[i] & 0xFF) << 8) | (raw[i + 1] & 0xFF)));
+                }
+                return builder.append("::/64").toString();
+            }
+            return "unknown";
+        } catch (IllegalArgumentException | java.net.UnknownHostException e) {
+            return "unknown";
+        }
+    }
+
+    /**
      * IPv4: same /24. IPv6: same /64. Anything unparseable compares exact-equal only.
      */
     public static boolean sameSubnet(String firstIp, String secondIp) {

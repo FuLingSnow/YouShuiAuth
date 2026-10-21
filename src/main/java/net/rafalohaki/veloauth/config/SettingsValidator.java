@@ -45,6 +45,7 @@ public final class SettingsValidator {
         validateQqSecret(qq);
         validateQqBinding(qq);
         validateQqCodes(qq, settings);
+        validateQqDeviceApproval(qq, settings);
         if (qq.getAllowedGroups().isEmpty()) {
             logger.warn("Config 'qq.allowed-groups' is empty; every QQ group will be rejected");
         }
@@ -92,6 +93,22 @@ public final class SettingsValidator {
             logger.warn("qq.login-code-ttl-seconds={} exceeds auth-server.timeout-seconds={}; "
                     + "codes will expire after the player is already kicked from limbo",
                     qq.getLoginCodeTtlSeconds(), settings.getAuthServerTimeoutSeconds());
+        }
+    }
+
+    /**
+     * The device-approval window is only useful while device auto-login is active; enabling it
+     * without auto-login is harmless but almost certainly a configuration mistake.
+     */
+    private static void validateQqDeviceApproval(QqSettings qq, Settings settings) {
+        int timeout = qq.getDeviceApprovalTimeoutSeconds();
+        if (timeout < 30 || timeout > 600) {
+            throw new IllegalArgumentException(
+                    "qq.device-approval.timeout-seconds must be in range 30-600");
+        }
+        if (qq.isDeviceApprovalEnabled() && !settings.isAutoLoginEnabled()) {
+            logger.warn("Config 'qq.device-approval.enabled=true' has no effect while "
+                    + "'security.auto-login-enabled=false'");
         }
     }
 

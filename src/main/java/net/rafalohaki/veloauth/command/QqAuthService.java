@@ -73,6 +73,7 @@ public class QqAuthService implements QqAuthBridge {
             .expireAfterWrite(Duration.ofSeconds(LOGIN_REQUEST_COOLDOWN_SECONDS))
             .build();
     private final Cache<UUID, ActiveBindCode> activeBindCodes;
+    private final QqDeviceApprovalService deviceApprovalService;
     private final java.util.Deque<QqNotify> pendingNotifications = new java.util.concurrent.ConcurrentLinkedDeque<>();
 
     QqAuthService(VeloAuth plugin, CommandContext ctx) {
@@ -84,6 +85,15 @@ public class QqAuthService implements QqAuthBridge {
                 .maximumSize(10_000)
                 .expireAfterWrite(Duration.ofSeconds(qqSettings.getBindCodeTtlSeconds()))
                 .build();
+        this.deviceApprovalService = new QqDeviceApprovalService(plugin, ctx, qqSettings, this);
+    }
+
+    /**
+     * @return true when the new-device confirmation is usable (QQ bridge, feature switch and
+     *         device auto-login all enabled)
+     */
+    public boolean isDeviceApprovalEnabled() {
+        return deviceApprovalService.isDeviceApprovalEnabled();
     }
 
     /**
@@ -482,14 +492,14 @@ public class QqAuthService implements QqAuthBridge {
         return QqResult.OK;
     }
 
-    private boolean alreadyAuthorized(Player player) {
+    boolean alreadyAuthorized(Player player) {
         String playerIp = PlayerAddressUtils.getPlayerIp(player);
         return ctx.authCache().isPlayerAuthorized(player.getUniqueId(), playerIp)
                 && ctx.authCache().hasActiveSession(
                         player.getUniqueId(), player.getUsername(), playerIp);
     }
 
-    private boolean requiresTotp(RegisteredPlayer dbPlayer) {
+    boolean requiresTotp(RegisteredPlayer dbPlayer) {
         return ctx.settings().getTwoFactorSettings().isEnabled()
                 && dbPlayer.getTotpToken() != null
                 && !dbPlayer.getTotpToken().isBlank();
@@ -575,7 +585,7 @@ public class QqAuthService implements QqAuthBridge {
         }
     }
 
-    private void authorizeDevice(Player player) {
+    void authorizeDevice(Player player) {
         String playerIp = PlayerAddressUtils.getPlayerIp(player);
         ctx.authCache().authorize(player.getUniqueId(),
                 new CachedAuthUser(player.getUniqueId(), player.getUsername(), playerIp,
@@ -586,6 +596,38 @@ public class QqAuthService implements QqAuthBridge {
         plugin.getAuthTimeoutScheduler().cancel(player.getUniqueId());
     }
 
+    // ===== New-device approvals (Y/N reply in the bound QQ group) =====
+
+    /**
+     * Freezes an unrecognised-device login until the bound QQ replies in the group.
+     *
+     * <p>Only triggers when the account already has a usable device record that does not match
+     * the current fingerprint; a first-ever login, a premium connection, a Bedrock bypass login
+     * and 2FA accounts return {@code false} unchanged.
+     *
+     * @return true when the login is now waiting for the reply; false means "fall back to limbo"
+     */
+    public boolean requestDeviceApproval(Player player,
+                                         ConnectionLifecycleRegistry.Operation operation,
+                                         String fingerprint,
+                                         Runnable onTimeout) {
+        return deviceApprovalService.requestDeviceApproval(
+                player, operation, fingerprint, onTimeout);
+    }
+
+    @Override
+    public QqResult decideDeviceApproval(String platform, String groupId, String qqId,
+                                         String decision, String approvalId) {
+        return deviceApprovalService.decideDeviceApproval(
+                platform, groupId, qqId, decision, approvalId);
+    }
+
+    /**
+     * Cancels a pending approval when the connection disappears before the group replies.
+     */
+    public void cancelDeviceApproval(Player player) {
+        deviceApprovalService.cancelDeviceApproval(player);
+    }
     /**
      * Revokes every remember-device token of an account (password change, unbind, admin action).
      */
@@ -602,25 +644,23 @@ public class QqAuthService implements QqAuthBridge {
 
     // ===== Auto-login notifications (delivered by the AstrBot poller) =====
 
-    /** Enqueues an auto-login notification for the bound QQ; the bot handles routing. */
+    /**
+     * Enqueues an auto-login notification for the bound QQ; the bot handles routing. The
+     * notification carries an opaque stopId so the owner can quote-reply {@code 阻止} to kick
+     * the session and revoke device trust.
+     */
     public void queueAutoLoginNotify(Player player, String remainingTime) {
-        try {
-            Optional<QqBinding> binding =
-                    dao().findByUuid(PLATFORM_QQ, player.getUniqueId().toString());
-            if (binding.isEmpty()) {
-                return;
-            }
-            String message = "[YouShuiAuth] 账号 " + player.getUsername()
-                    + " 刚刚通过 Cookie 自动登录，免密剩余 " + remainingTime
-                    + "。若非本人操作，请尽快联系管理员处理。";
-            QqNotify item = new QqNotify(binding.get().getQqId(), message);
-            pendingNotifications.addLast(item);
-            while (pendingNotifications.size() > MAX_PENDING_NOTIFICATIONS) {
-                pendingNotifications.pollFirst();
-            }
-        } catch (SQLException | RuntimeException e) {
-            logger.warn(SECURITY_MARKER, "Failed to queue auto-login notify for {}",
-                    player.getUsername());
+        deviceApprovalService.queueAutoLoginNotify(player, remainingTime);
+    }
+
+    @Override
+    public QqResult stopAutoLogin(String platform, String groupId, String qqId, String stopId) {
+        return deviceApprovalService.stopAutoLogin(platform, groupId, qqId, stopId);
+    }
+    void enqueueNotification(QqNotify item) {
+        pendingNotifications.addLast(item);
+        while (pendingNotifications.size() > MAX_PENDING_NOTIFICATIONS) {
+            pendingNotifications.pollFirst();
         }
     }
 
@@ -646,7 +686,7 @@ public class QqAuthService implements QqAuthBridge {
         return drained;
     }
 
-    private RegisteredPlayer loadRegisteredPlayer(Player player) {
+    RegisteredPlayer loadRegisteredPlayer(Player player) {
         var result = ctx.databaseManager().findPlayerByNickname(player.getUsername()).join();
         if (result == null || result.isDatabaseError()) {
             return null;
@@ -698,11 +738,11 @@ public class QqAuthService implements QqAuthBridge {
         return value == null || value.isBlank();
     }
 
-    private QqDao dao() {
+    QqDao dao() {
         return ctx.databaseManager().getQqDao();
     }
 
-    private void audit(AuditEventType type, String nickname, String details) {
+    void audit(AuditEventType type, String nickname, String details) {
         AuditLogService audit = plugin.getAuditLogService();
         if (audit != null) {
             audit.save(type, nickname, null, details);

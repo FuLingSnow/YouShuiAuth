@@ -681,7 +681,13 @@ public class AuthListener {
         boolean allowUnownedCleanup = allowsUnownedDisconnectCleanup(event, player);
         if (!connectionLifecycleRegistry.retire(
                 player, allowUnownedCleanup,
-                () -> plugin.clearConnectionBoundState(player, authCache, connectionManager))) {
+                () -> {
+                    plugin.clearConnectionBoundState(player, authCache, connectionManager);
+                    QqAuthService qqAuthService = plugin.getQqAuthService();
+                    if (qqAuthService != null) {
+                        qqAuthService.cancelDeviceApproval(player);
+                    }
+                })) {
             logger.debug(SECURITY_MARKER,
                     "Ignoring {} disconnect cleanup for non-owning connection {} ({})",
                     event.getLoginStatus(), player.getUsername(), playerUuid);
@@ -1254,7 +1260,16 @@ public class AuthListener {
         String fingerprint = service == null ? null
                 : DeviceFingerprints.fingerprint(
                         player, settings.isAutoLoginRequireSameSubnet());
-        if (service == null || !service.tryDeviceLogin(player, fingerprint)) {
+        if (service == null) {
+            startLimboFlow(player, operation);
+            return;
+        }
+        if (!service.tryDeviceLogin(player, fingerprint)) {
+            // A known account from an unrecognised device may instead wait for a Y/N reply in
+            // the bound QQ group; every other failure keeps the original limbo fallback.
+            if (attemptDeviceApproval(player, operation, service, fingerprint)) {
+                return;
+            }
             startLimboFlow(player, operation);
             return;
         }
@@ -1277,12 +1292,21 @@ public class AuthListener {
                 .thenAccept(dbResult -> {
                     RegisteredPlayer account = (dbResult != null && !dbResult.isDatabaseError())
                             ? dbResult.getValue() : null;
-                    if (account == null || !autoLoginQualifies(player, account)) {
+                    if (account == null) {
                         startLimboFlow(player, operation);
                         return;
                     }
                     QqAuthService service = plugin.getQqAuthService();
                     if (!autoLoginAllowedForAccount(player, service)) {
+                        startLimboFlow(player, operation);
+                        return;
+                    }
+                    AutoLoginDecision decision = evaluateAutoLogin(player, account);
+                    if (decision == AutoLoginDecision.SUBNET_MISMATCH
+                            && attemptDeviceApproval(player, operation, service)) {
+                        return;
+                    }
+                    if (decision != AutoLoginDecision.OK) {
                         startLimboFlow(player, operation);
                         return;
                     }
@@ -1310,22 +1334,72 @@ public class AuthListener {
                 });
     }
 
-    private boolean autoLoginQualifies(Player player, RegisteredPlayer account) {
+    /**
+     * Why device auto-login is (not) available. {@code SUBNET_MISMATCH} is the one reason that
+     * may be resolved by a QQ confirmation instead of the login lobby; the others must keep the
+     * established fallback.
+     */
+    private enum AutoLoginDecision {
+        OK,
+        ONLINE_MODE,
+        TOTP_REQUIRED,
+        SUBNET_MISMATCH,
+        EXPIRED
+    }
+
+    private AutoLoginDecision evaluateAutoLogin(Player player, RegisteredPlayer account) {
         if (player.isOnlineMode()) {
-            return false;
+            return AutoLoginDecision.ONLINE_MODE;
         }
         // Never bypass a second factor.
         if (settings.getTwoFactorSettings().isEnabled()
                 && account.getTotpToken() != null && !account.getTotpToken().isBlank()) {
-            return false;
+            return AutoLoginDecision.TOTP_REQUIRED;
         }
         if (settings.isAutoLoginRequireSameSubnet()
                 && !DeviceFingerprints.sameSubnet(
                         PlayerAddressUtils.getPlayerIp(player), account.getLoginIp())) {
-            return false;
+            return AutoLoginDecision.SUBNET_MISMATCH;
         }
         long maxAgeMillis = settings.getAutoLoginMaxAgeDays() * 86_400_000L;
-        return maxAgeMillis <= 0 || System.currentTimeMillis() - account.getLoginDate() <= maxAgeMillis;
+        if (maxAgeMillis > 0
+                && System.currentTimeMillis() - account.getLoginDate() > maxAgeMillis) {
+            return AutoLoginDecision.EXPIRED;
+        }
+        return AutoLoginDecision.OK;
+    }
+
+    /**
+     * Starts the QQ confirmation for a known account on an unrecognised device.
+     *
+     * @return true when the login is waiting for the group reply; false means "fall back to limbo"
+     */
+    private boolean attemptDeviceApproval(
+            Player player, Operation operation, QqAuthService service) {
+        return attemptDeviceApproval(player, operation, service,
+                service == null ? null
+                        : DeviceFingerprints.fingerprint(
+                                player, settings.isAutoLoginRequireSameSubnet()));
+    }
+
+    private boolean attemptDeviceApproval(
+            Player player, Operation operation, QqAuthService service, String fingerprint) {
+        if (service == null) {
+            return false;
+        }
+        Runnable onTimeout = () -> connectionLifecycleRegistry.runIfCurrent(operation, () -> {
+            if (!player.isActive() || !connectionManager.isPlayerOnAuthServer(player)) {
+                return;
+            }
+            String playerIp = PlayerAddressUtils.getPlayerIp(player);
+            if (authCache.isPlayerAuthorized(player.getUniqueId(), playerIp)
+                    && authCache.hasActiveSession(
+                            player.getUniqueId(), player.getUsername(), playerIp)) {
+                return; // authenticated manually while the confirmation was pending
+            }
+            startLimboFlow(player, operation);
+        });
+        return service.requestDeviceApproval(player, operation, fingerprint, onTimeout);
     }
 
     private void startLimboFlow(Player player, Operation operation) {

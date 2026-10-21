@@ -39,7 +39,9 @@ class LogReaderTest {
 
         Path proxyRoot = LogReader.resolveProxyRoot(pluginDir);
 
-        assertEquals(Path.of("/srv/velocity"), proxyRoot,
+        // On Windows a leading "/" resolves against the current drive, so compare via the
+        // same Path.of() normalization instead of a platform-specific string.
+        assertEquals(Path.of("/srv/velocity").toAbsolutePath().normalize(), proxyRoot,
                 () -> "Absolute data dir must resolve to the proxy root, got: " + proxyRoot);
     }
 
@@ -62,7 +64,8 @@ class LogReaderTest {
 
         Path logPath = LogReader.resolveLogPath(pluginDir);
 
-        assertEquals(Path.of("/srv/velocity/logs/latest.log"), logPath,
+        assertEquals(Path.of("/srv/velocity/logs/latest.log").toAbsolutePath().normalize(),
+                logPath,
                 () -> "Log path must be <proxy-root>/logs/latest.log: " + logPath);
     }
 }

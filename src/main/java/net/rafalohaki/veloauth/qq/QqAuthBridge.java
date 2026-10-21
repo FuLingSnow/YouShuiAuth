@@ -29,6 +29,31 @@ public interface QqAuthBridge {
     QqResult confirmLogin(String platform, String groupId, String qqId, String code);
 
     /**
+     * Applies the group reply to a pending new-device approval.
+     *
+     * @param platform   bot platform ("qq")
+     * @param groupId    QQ group id (already allow-listed by the bridge)
+     * @param qqId       replier QQ number; must be the QQ bound to the pending account
+     * @param decision   {@code Y}/{@code approve} to allow, {@code N}/{@code deny} to refuse
+     * @param approvalId opaque token delivered with the approval notification
+     * @return stable result code
+     */
+    QqResult decideDeviceApproval(String platform, String groupId, String qqId,
+                                  String decision, String approvalId);
+
+    /**
+     * Applies the quote-reply {@code 阻止} to a cookie auto-login notification: kicks the
+     * online player and revokes the account's device records.
+     *
+     * @param platform bot platform ("qq")
+     * @param groupId  QQ group id (already allow-listed by the bridge)
+     * @param qqId     replier QQ number; must be the QQ bound to the notified account
+     * @param stopId   opaque token delivered with the auto-login notification
+     * @return stable result code
+     */
+    QqResult stopAutoLogin(String platform, String groupId, String qqId, String stopId);
+
+    /**
      * Returns and clears pending group notifications (auto-login alerts). The bot poller is
      * responsible for delivering them.
      *
