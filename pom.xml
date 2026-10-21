@@ -6,28 +6,32 @@
 
     <groupId>net.rafalohaki.veloauth</groupId>
     <artifactId>veloauth</artifactId>
-    <version>1.0.3</version>
+    <version>1.1.0</version>
     <packaging>jar</packaging>
 
     <name>YouShuiAuth</name>
     <description>Complete Velocity Authentication Plugin with BCrypt, Virtual Threads and multi-database support
     </description>
     
-    <url>https://github.com/rafalohaki/VeloAuth</url>
-    
+    <url>https://github.com/FuLingSnow/youshuiauth</url>
+
+    <!--
+      本项目许可证为 AGPL-3.0（见 LICENSE）。上游 VeloAuth 的 MIT 许可仅覆盖衍生自
+      上游的原始部分，全文保留于 LICENSE.VeloAuth，第三方组件归属见 THIRD_PARTY_NOTICES.md。
+    -->
     <licenses>
         <license>
-            <name>MIT License</name>
-            <url>https://opensource.org/licenses/MIT</url>
+            <name>GNU Affero General Public License v3.0</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.html</url>
             <distribution>repo</distribution>
         </license>
     </licenses>
-    
+
     <developers>
         <developer>
-            <name>rafalohaki</name>
-            <email>rafal@ohaki.pl</email>
-            <url>https://github.com/rafalohaki</url>
+            <name>FuLingSnow</name>
+            <email>472137987@qq.com</email>
+            <url>https://github.com/FuLingSnow</url>
         </developer>
     </developers>
 

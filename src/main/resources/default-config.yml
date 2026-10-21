@@ -381,6 +381,30 @@ qq:
   login-code-ttl-seconds: 120
   # 桥接端点上单个 QQ 的尝试上限。
   max-attempts-per-minute: 5
+  # 新设备/异地登录 QQ 确认（仅离线账号）。
+  #
+  # 触发条件：账号已经保存过设备记录，但本次登录的设备指纹不匹配
+  # （网段是否参与指纹由 security.auto-login-require-same-subnet 决定）。
+  # 首次登录（没有任何设备记录）、正版账号、基岩直通、2FA 账号都不会触发。
+  #
+  # 确认期间玩家停留在当前连接、不进入大厅；绑定 QQ 的群会收到一条通知：
+  #   [YouShuiAuth] 账号 X 新设备登录请求：Windows / 版本 1.21.4 (协议 776) / IP 段 1.2.3.x
+  #   确认本人请引用本条消息回复 Y，拒绝回复 N（有效期 120 秒）
+  # AstrBot 插件（v1.0.1 起）投递通知后记住消息，收到“引用该消息的 Y/N 回复”时调用
+  # POST /internal/qq/device-approval，请求体：
+  #   {"platform":"qq","groupId":"...","qqId":"<回复者QQ>",
+  #    "decision":"Y","approvalId":"<通知 items[].approvalId>"}
+  # 服务端强校验回复者 QQ 必须等于绑定 QQ，防止群内他人冒充。
+  # 机器人侧从 GET /internal/qq/notify 的 items[].type 区分消息类型
+  # （auto_login / device_approval），device_approval 携带 approvalId。
+  #
+  # 回复 Y：记录新设备并放行；回复 N：断开并撤销旧设备记录；
+  # 超时：自动回退到正常的大厅登录流程，不踢出玩家。
+  device-approval:
+    # 总开关。需要 qq.enabled 与 security.auto-login-enabled 同时开启才会生效。
+    enabled: false
+    # 确认窗口（30-600 秒）。
+    timeout-seconds: 120
 
 # /ysauth report —— 生成诊断报告并上传到
 # https://mclo.gs 以便分享给支持人员。报告包含：

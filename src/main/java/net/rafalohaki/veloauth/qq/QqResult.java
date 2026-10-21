@@ -22,6 +22,9 @@ public enum QqResult {
     NOT_ONLINE("not_online"),
     ALREADY_AUTHORIZED("already_authorized"),
     TOTP_REQUIRED("totp_required"),
+    NO_PENDING_APPROVAL("no_pending_approval"),
+    INVALID_DECISION("invalid_decision"),
+    FORBIDDEN("forbidden"),
     RATE_LIMITED("rate_limited"),
     GROUP_NOT_ALLOWED("group_not_allowed"),
     ERROR("error");

@@ -62,6 +62,56 @@ class QqSettingsLoadingTest {
     }
 
     @Test
+    void loadsDeviceApprovalSection() throws IOException {
+        writeConfig("""
+                qq:
+                  enabled: true
+                  shared-secret: "0123456789abcdef0123456789abcdef"
+                  device-approval:
+                    enabled: true
+                    timeout-seconds: 90
+                """);
+
+        Settings settings = new Settings(dataDirectory);
+        assertTrue(settings.load());
+
+        QqSettings qq = settings.getQqSettings();
+        assertTrue(qq.isDeviceApprovalEnabled());
+        assertEquals(90, qq.getDeviceApprovalTimeoutSeconds());
+    }
+
+    @Test
+    void deviceApprovalDefaultsToDisabled() throws IOException {
+        writeConfig("""
+                qq:
+                  enabled: true
+                  shared-secret: "0123456789abcdef0123456789abcdef"
+                """);
+
+        Settings settings = new Settings(dataDirectory);
+        assertTrue(settings.load());
+
+        QqSettings qq = settings.getQqSettings();
+        assertFalse(qq.isDeviceApprovalEnabled());
+        assertEquals(120, qq.getDeviceApprovalTimeoutSeconds());
+    }
+
+    @Test
+    void rejectsDeviceApprovalTimeoutOutOfRange() throws IOException {
+        writeConfig("""
+                qq:
+                  enabled: true
+                  shared-secret: "0123456789abcdef0123456789abcdef"
+                  device-approval:
+                    enabled: true
+                    timeout-seconds: 10
+                """);
+
+        Settings settings = new Settings(dataDirectory);
+        assertFalse(settings.load());
+    }
+
+    @Test
     void rejectsEnabledBridgeWithoutALongEnoughSecret() throws IOException {
         writeConfig("""
                 qq:

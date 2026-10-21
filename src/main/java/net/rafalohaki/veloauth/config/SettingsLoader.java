@@ -477,7 +477,7 @@ final class SettingsLoader {
             return;
         }
         QqSettings target = state.qqSettings;
-        state.qqSettings = new QqSettings(
+        QqSettings base = new QqSettings(
                 YamlParserUtils.getBoolean(qq, YAML_FIELD_ENABLED, target.isEnabled()),
                 YamlParserUtils.getString(qq, "bind-address", target.getBindAddress()),
                 YamlParserUtils.getInt(qq, "port", target.getPort()),
@@ -489,7 +489,37 @@ final class SettingsLoader {
                         qq, "login-code-ttl-seconds", target.getLoginCodeTtlSeconds()),
                 YamlParserUtils.getInt(
                         qq, "max-attempts-per-minute", target.getMaxAttemptsPerMinute()),
-                YamlParserUtils.getString(qq, "join-url", target.getJoinUrl()));
+                YamlParserUtils.getString(qq, "join-url", target.getJoinUrl()),
+                target.isDeviceApprovalEnabled(),
+                target.getDeviceApprovalTimeoutSeconds());
+        state.qqSettings = applyDeviceApprovalSettings(base, qq);
+    }
+
+    /**
+     * {@code qq.device-approval} is a nested section. A missing section keeps the previous
+     * values so an unrelated reload does not silently flip the feature on or off.
+     */
+    private static QqSettings applyDeviceApprovalSettings(
+            QqSettings base, Map<String, Object> qq) {
+        Map<String, Object> approval = mapSectionOrEmpty(
+                qq, "device-approval", "qq.device-approval");
+        if (approval.isEmpty()) {
+            return base;
+        }
+        return new QqSettings(
+                base.enabled(),
+                base.bindAddress(),
+                base.port(),
+                base.sharedSecret(),
+                base.allowedGroups(),
+                base.bindCodeTtlSeconds(),
+                base.loginCodeTtlSeconds(),
+                base.maxAttemptsPerMinute(),
+                base.joinUrl(),
+                YamlParserUtils.getBoolean(
+                        approval, YAML_FIELD_ENABLED, base.isDeviceApprovalEnabled()),
+                YamlParserUtils.getInt(
+                        approval, "timeout-seconds", base.getDeviceApprovalTimeoutSeconds()));
     }
 
     /**

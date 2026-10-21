@@ -46,6 +46,12 @@ class LoginCommand implements SimpleCommand {
         if (player == null) {
             return;
         }
+        QqAuthService qqService = ctx.plugin().getQqAuthService();
+        if (qqService != null && qqService.isDeviceApprovalPending(player)) {
+            player.sendMessage(ctx.messages().component("qq.device_approval.login_blocked",
+                    NamedTextColor.YELLOW, qqService.getDeviceApprovalTimeoutSeconds()));
+            return;
+        }
         String[] args = invocation.arguments();
         if (args.length == 0) {
             ConnectionLifecycleRegistry.Operation operation = ctx.captureConnectionOperation(player);
@@ -226,6 +232,8 @@ class LoginCommand implements SimpleCommand {
 
     private void parkForTotpVerify(AuthenticationContext authContext) {
         Player player = authContext.player();
+        ctx.plugin().getAuthTimeoutScheduler().renewForCode(
+                player, ctx.settings().getTwoFactorSettings().pendingTimeoutSeconds());
         ctx.runIfConnectionCurrent(authContext.connectionOperation(), () -> {
             String ip = PlayerAddressUtils.getPlayerIp(player);
             ctx.pendingTotpStore().put(PendingTotpState.forLogin(

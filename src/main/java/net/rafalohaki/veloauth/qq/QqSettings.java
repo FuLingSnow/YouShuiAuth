@@ -18,6 +18,10 @@ import java.util.Set;
  * @param loginCodeTtlSeconds  lifetime of a limbo quick-login code
  * @param maxAttemptsPerMinute per-QQ attempt ceiling for the bridge endpoints
  * @param joinUrl              optional QQ group invite link shown by {@code /qqbind}
+ * @param deviceApprovalEnabled when true, a mismatching device fingerprint waits for a Y/N
+ *                              confirmation in the bound QQ group instead of falling back to limbo
+ * @param deviceApprovalTimeoutSeconds confirmation window; afterwards the normal limbo login
+ *                              flow resumes
  */
 public record QqSettings(
         boolean enabled,
@@ -28,7 +32,9 @@ public record QqSettings(
         int bindCodeTtlSeconds,
         int loginCodeTtlSeconds,
         int maxAttemptsPerMinute,
-        String joinUrl) {
+        String joinUrl,
+        boolean deviceApprovalEnabled,
+        int deviceApprovalTimeoutSeconds) {
 
     // Loopback default; PMD's hard-coded-IP rule does not apply to a bind address default.
     @SuppressWarnings("PMD.AvoidUsingHardCodedIP")
@@ -37,11 +43,13 @@ public record QqSettings(
     public static final int DEFAULT_BIND_CODE_TTL_SECONDS = 300;
     public static final int DEFAULT_LOGIN_CODE_TTL_SECONDS = 120;
     public static final int DEFAULT_MAX_ATTEMPTS_PER_MINUTE = 5;
+    public static final int DEFAULT_DEVICE_APPROVAL_TIMEOUT_SECONDS = 120;
 
     public QqSettings() {
         this(false, DEFAULT_BIND_ADDRESS, DEFAULT_PORT, "", Set.of(),
                 DEFAULT_BIND_CODE_TTL_SECONDS, DEFAULT_LOGIN_CODE_TTL_SECONDS,
-                DEFAULT_MAX_ATTEMPTS_PER_MINUTE, "");
+                DEFAULT_MAX_ATTEMPTS_PER_MINUTE, "",
+                false, DEFAULT_DEVICE_APPROVAL_TIMEOUT_SECONDS);
     }
 
     public QqSettings {
@@ -89,5 +97,13 @@ public record QqSettings(
 
     public String getJoinUrl() {
         return joinUrl;
+    }
+
+    public boolean isDeviceApprovalEnabled() {
+        return deviceApprovalEnabled;
+    }
+
+    public int getDeviceApprovalTimeoutSeconds() {
+        return deviceApprovalTimeoutSeconds;
     }
 }

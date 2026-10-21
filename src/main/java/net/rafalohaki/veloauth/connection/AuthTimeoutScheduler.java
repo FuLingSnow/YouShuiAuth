@@ -23,21 +23,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
-/**
- * Disconnects players who linger on the auth server without authenticating within
- * {@code auth-server.timeout-seconds}.
- * <p>
- * Lifecycle:
- * <ul>
- *   <li>{@link #schedule(Player)} — called from {@code AuthListener.handleAuthServerConnection}
- *       when an unauthenticated player lands on the auth server.</li>
- *   <li>{@link #cancel(UUID)} — called on successful auth (PostAuthFlow) and on disconnect.</li>
- *   <li>{@link #shutdown()} — called from {@code VeloAuth.shutdown()}; cancels all pending tasks.</li>
- * </ul>
- * <p>
- * Thread-safe: state held in {@link ConcurrentHashMap}; scheduled tasks run on Velocity's
- * scheduler thread, so {@code player.disconnect(...)} is invoked on a safe thread.
- */
 public final class AuthTimeoutScheduler {
 
     private static final Marker AUTH_MARKER = MarkerFactory.getMarker("AUTH");
@@ -56,6 +41,8 @@ public final class AuthTimeoutScheduler {
      */
     private static final int INITIAL_REMINDER_DELAY_SECONDS = 1;
     private static final String GENERIC_PROMPT_KEY = "auth.prompt.generic";
+    static final long MAX_SESSION_WINDOW_MILLIS = 600_000L;
+    static final int RENEWAL_GRACE_SECONDS = 30;
 
     private final VeloAuth plugin;
     private final Settings settings;
@@ -65,6 +52,8 @@ public final class AuthTimeoutScheduler {
     private final Logger logger;
     private final ConcurrentMap<UUID, ScheduledTask> pending = new ConcurrentHashMap<>();
     private final ConcurrentMap<UUID, ScheduledTask> reminders = new ConcurrentHashMap<>();
+    private final ConcurrentMap<UUID, Long> deadlines = new ConcurrentHashMap<>();
+    private final ConcurrentMap<UUID, Long> sessionStarts = new ConcurrentHashMap<>();
     /** Account-status-aware reminder content, filled in by AuthListener once the nickname
      *  lookup resolves; absent entry means "status unknown — use the generic prompt". */
     private final ConcurrentMap<UUID, ReminderPrompt> reminderPrompts = new ConcurrentHashMap<>();
@@ -81,39 +70,109 @@ public final class AuthTimeoutScheduler {
         this.logger = plugin.getLogger();
     }
 
-    /**
-     * Schedules the repeating login/register reminder and (when enabled) a kick for the given
-     * player after {@code auth-server.timeout-seconds}. The reminder is the safety net for a
-     * lost one-shot auth prompt: it repeats until the player authenticates, leaves the auth
-     * server, or disconnects. Any previously scheduled tasks for the same UUID are cancelled
-     * first.
-     */
     public void schedule(Player player) {
         int seconds = settings.getAuthServerTimeoutSeconds();
         UUID uuid = player.getUniqueId();
+        long now = System.currentTimeMillis();
 
         lifecycleLock.lock();
         try {
             if (closed.get()) {
                 return;
             }
+            long sessionStart = sessionStarts.computeIfAbsent(uuid, ignored -> now);
             scheduleReminderLocked(player, uuid);
             if (seconds > 0) {
-                scheduleKickLocked(player, uuid, seconds);
+                long base = seconds * 1000L;
+                armLocked(player, uuid, sessionStart,
+                        Math.max(deadlines.getOrDefault(uuid, 0L), now + base));
+            } else {
+                ScheduledTaskRegistry.cancel(pending, uuid);
+                deadlines.remove(uuid);
             }
         } finally {
             lifecycleLock.unlock();
         }
         if (logger.isDebugEnabled()) {
-            logger.debug(AUTH_MARKER, "Auth timeout scheduled for {} ({}s)",
-                    player.getUsername(), seconds);
+            logger.debug(AUTH_MARKER, "Auth timeout armed for {} (base {}s, {} ms left)",
+                    player.getUsername(), seconds, remainingMillis(uuid));
         }
     }
 
-    private void scheduleKickLocked(Player player, UUID uuid, int seconds) {
+    public void renewForCode(Player player, int codeTtlSeconds) {
+        if (player == null || codeTtlSeconds <= 0) {
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        long now = System.currentTimeMillis();
+        lifecycleLock.lock();
+        try {
+            if (closed.get() || !deadlines.containsKey(uuid)) {
+                return;
+            }
+            long sessionStart = sessionStarts.getOrDefault(uuid, now);
+            long base = Math.max(0L, settings.getAuthServerTimeoutSeconds()) * 1000L;
+            long codeWindow = (codeTtlSeconds + RENEWAL_GRACE_SECONDS) * 1000L;
+            long candidate = Math.max(deadlines.getOrDefault(uuid, 0L),
+                    Math.max(sessionStart + base, now + codeWindow));
+            armLocked(player, uuid, sessionStart, candidate);
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    public void beginSession(Player player) {
+        if (player == null) {
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        long now = System.currentTimeMillis();
+        lifecycleLock.lock();
+        try {
+            if (closed.get()) {
+                return;
+            }
+            sessionStarts.putIfAbsent(uuid, now);
+            long base = Math.max(0L, settings.getAuthServerTimeoutSeconds()) * 1000L;
+            deadlines.putIfAbsent(uuid, now + base);
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    public void suspend(UUID uuid) {
+        if (uuid == null) {
+            return;
+        }
+        lifecycleLock.lock();
+        try {
+            ScheduledTaskRegistry.cancel(pending, uuid);
+            ScheduledTaskRegistry.cancel(reminders, uuid);
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    private void armLocked(Player player, UUID uuid, long sessionStart, long candidateDeadline) {
+        long now = System.currentTimeMillis();
+        long deadline = Math.min(candidateDeadline, sessionStart + MAX_SESSION_WINDOW_MILLIS);
+        if (deadline <= now) {
+            deadline = now + 1_000L;
+        }
+        deadlines.put(uuid, deadline);
+        long remaining = Math.max(1_000L, deadline - now);
+        scheduleKickLocked(player, uuid, remaining, (int) ((remaining + 999L) / 1000L));
+    }
+
+    private long remainingMillis(UUID uuid) {
+        Long deadline = deadlines.get(uuid);
+        return deadline == null ? 0L : Math.max(0L, deadline - System.currentTimeMillis());
+    }
+
+    private void scheduleKickLocked(Player player, UUID uuid, long delayMillis, int windowSeconds) {
         ScheduledTaskRegistry.replace(pending, uuid, callback ->
                 plugin.getServer().getScheduler().buildTask(plugin, callback)
-                        .delay(seconds, TimeUnit.SECONDS)
+                        .delay(Math.max(1L, delayMillis), TimeUnit.MILLISECONDS)
                         .schedule(), () -> {
             if (closed.get() || !player.isActive()) {
                 return;
@@ -127,11 +186,11 @@ public final class AuthTimeoutScheduler {
                 return; // already moved on, nothing to do
             }
 
-            player.disconnect(playerMessage(player, settings, messages, "auth.timeout.kick", NamedTextColor.RED, seconds));
+            player.disconnect(playerMessage(player, settings, messages, "auth.timeout.kick", NamedTextColor.RED, windowSeconds));
             if (logger.isInfoEnabled()) {
                 logger.info(AUTH_MARKER,
                         "Kicked player {} after {}s auth timeout (no login/register)",
-                        player.getUsername(), seconds);
+                        player.getUsername(), windowSeconds);
             }
         });
     }
@@ -203,13 +262,12 @@ public final class AuthTimeoutScheduler {
                 && authCache.hasActiveSession(player.getUniqueId(), player.getUsername(), ip);
     }
 
-    /**
-     * Cancels a scheduled timeout. Called on successful authentication or disconnect.
-     */
     public void cancel(UUID uuid) {
         ScheduledTaskRegistry.cancel(pending, uuid);
         ScheduledTaskRegistry.cancel(reminders, uuid);
         reminderPrompts.remove(uuid);
+        deadlines.remove(uuid);
+        sessionStarts.remove(uuid);
     }
 
     /**
@@ -222,6 +280,8 @@ public final class AuthTimeoutScheduler {
                 ScheduledTaskRegistry.cancelAll(pending);
                 ScheduledTaskRegistry.cancelAll(reminders);
                 reminderPrompts.clear();
+                deadlines.clear();
+                sessionStarts.clear();
             }
         } finally {
             lifecycleLock.unlock();

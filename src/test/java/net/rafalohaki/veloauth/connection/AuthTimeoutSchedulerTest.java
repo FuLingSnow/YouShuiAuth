@@ -243,4 +243,111 @@ class AuthTimeoutSchedulerTest {
         verify(player, never()).disconnect(any());
         verifyNoInteractions(messages, authCache, connectionManager);
     }
+
+    @Test
+    void renewForCode_LongCode_ExtendsDeadline() {
+        DeadlineFixture fixture = new DeadlineFixture(180);
+        fixture.scheduler.schedule(fixture.player);
+        assertEquals(180_000L, fixture.lastKickDelayMillis(), 2_000L);
+
+        fixture.scheduler.renewForCode(fixture.player, 300);
+
+        assertEquals(330_000L, fixture.lastKickDelayMillis(), 2_000L);
+    }
+
+    @Test
+    void renewForCode_ShorterCode_NeverShortensDeadline() {
+        DeadlineFixture fixture = new DeadlineFixture(180);
+        fixture.scheduler.schedule(fixture.player);
+        fixture.scheduler.renewForCode(fixture.player, 300);
+        long extended = fixture.lastKickDelayMillis();
+
+        fixture.scheduler.renewForCode(fixture.player, 120);
+
+        assertEquals(extended, fixture.lastKickDelayMillis(), 1_000L);
+    }
+
+    @Test
+    void renewForCode_RespectsSessionCap() {
+        DeadlineFixture fixture = new DeadlineFixture(180);
+        fixture.scheduler.schedule(fixture.player);
+
+        fixture.scheduler.renewForCode(fixture.player, 900);
+
+        assertEquals(AuthTimeoutScheduler.MAX_SESSION_WINDOW_MILLIS,
+                fixture.lastKickDelayMillis(), 2_000L);
+    }
+
+    @Test
+    void renewForCode_WithoutLimboSession_DoesNotArm() {
+        DeadlineFixture fixture = new DeadlineFixture(180);
+
+        fixture.scheduler.renewForCode(fixture.player, 300);
+
+        assertEquals(-1L, fixture.lastKickDelayMillis());
+    }
+
+    @Test
+    void suspendThenSchedule_KeepsLongerDeadline() {
+        DeadlineFixture fixture = new DeadlineFixture(180);
+        fixture.scheduler.schedule(fixture.player);
+        long armed = fixture.lastKickDelayMillis();
+
+        fixture.scheduler.suspend(fixture.playerUuid);
+        fixture.scheduler.schedule(fixture.player);
+
+        assertEquals(armed, fixture.lastKickDelayMillis(), 2_000L);
+    }
+
+    @Test
+    void schedule_TimeoutDisabled_DoesNotArmKick() {
+        DeadlineFixture fixture = new DeadlineFixture(0);
+
+        fixture.scheduler.schedule(fixture.player);
+
+        assertEquals(-1L, fixture.lastKickDelayMillis());
+    }
+
+    private static final class DeadlineFixture {
+        final Scheduler velocityScheduler = mock(Scheduler.class);
+        final Player player = mock(Player.class);
+        final UUID playerUuid = UUID.randomUUID();
+        final AuthTimeoutScheduler scheduler;
+        private long lastKickDelayMillis = -1L;
+
+        DeadlineFixture(int baseSeconds) {
+            ProxyServer proxyServer = mock(ProxyServer.class);
+            Settings settings = mock(Settings.class);
+            VeloAuth plugin = new VeloAuth(
+                    proxyServer, mock(Logger.class), Path.of("."), mock(Metrics.Factory.class));
+            scheduler = new AuthTimeoutScheduler(plugin, settings, mock(Messages.class),
+                    mock(AuthCache.class), mock(ConnectionManager.class));
+
+            when(proxyServer.getScheduler()).thenReturn(velocityScheduler);
+            when(settings.getAuthServerTimeoutSeconds()).thenReturn(baseSeconds);
+            when(player.getUniqueId()).thenReturn(playerUuid);
+            when(player.isActive()).thenReturn(true);
+            when(velocityScheduler.buildTask(
+                    any(), org.mockito.ArgumentMatchers.<Consumer<ScheduledTask>>any()))
+                    .thenAnswer(invocation -> taskBuilder());
+        }
+
+        private Scheduler.TaskBuilder taskBuilder() {
+            Scheduler.TaskBuilder builder = mock(Scheduler.TaskBuilder.class);
+            when(builder.repeat(org.mockito.ArgumentMatchers.anyLong(), any())).thenReturn(builder);
+            when(builder.delay(org.mockito.ArgumentMatchers.anyLong(), any()))
+                    .thenAnswer(invocation -> {
+                        if (invocation.getArgument(1) == TimeUnit.MILLISECONDS) {
+                            lastKickDelayMillis = invocation.getArgument(0);
+                        }
+                        return builder;
+                    });
+            when(builder.schedule()).thenReturn(mock(ScheduledTask.class));
+            return builder;
+        }
+
+        long lastKickDelayMillis() {
+            return lastKickDelayMillis;
+        }
+    }
 }

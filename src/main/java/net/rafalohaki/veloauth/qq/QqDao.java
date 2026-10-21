@@ -190,6 +190,23 @@ public class QqDao {
         return Optional.ofNullable(rememberTokenDao.queryForId(tokenHash));
     }
 
+    /**
+     * Returns a live device row for an account. Used to distinguish "first login on a new
+     * account" from "known account logging in from a different device".
+     */
+    public Optional<QqRememberToken> findUsableRememberTokenByUuid(String uuid, long now)
+            throws SQLException {
+        if (isBlank(uuid)) {
+            return Optional.empty();
+        }
+        List<QqRememberToken> rows = rememberTokenDao.queryBuilder()
+                .where().eq(COL_UUID, uuid.trim())
+                .and().eq(COL_REVOKED, false)
+                .and().gt(COL_EXPIRES_AT, now)
+                .query();
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
     public boolean touchRememberToken(QqRememberToken token) throws SQLException {
         if (token == null) {
             return false;
