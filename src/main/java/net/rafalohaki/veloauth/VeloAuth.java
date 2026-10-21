@@ -59,7 +59,7 @@ import java.util.concurrent.locks.ReentrantLock;
         name = "YouShuiAuth",
         version = BuildConstants.VERSION,
         description = "Complete Velocity Authentication Plugin with BCrypt, Virtual Threads and multi-database support",
-    authors = {"Rafal"},
+    authors = {"FuLingSnow"},
     dependencies = {
         @Dependency(id = "floodgate", optional = true)
     }

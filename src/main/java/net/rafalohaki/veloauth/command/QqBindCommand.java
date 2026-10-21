@@ -56,22 +56,31 @@ class QqBindCommand implements SimpleCommand {
     private void sendCode(Player player, QqAuthService.BindCodeIssue issue) {
         int minutes = Math.max(1, issue.ttlSeconds() / 60);
         String key = issue.createsAccount() ? "qq.bind.register_created" : "qq.bind.created";
-        Component created = messages.component(key, NamedTextColor.GREEN, issue.code(), minutes);
+        Component message = messages.component(key, NamedTextColor.GREEN, issue.code(), minutes);
 
         // The AstrBot command is the Chinese "/绑定"; copy exactly what the player must send.
         String copyCommand = "/绑定 " + issue.code();
+        ClickEvent copyEvent = ClickEvent.copyToClipboard(copyCommand);
         Component copy = messages.component("qq.bind.copy", NamedTextColor.AQUA)
-                .clickEvent(ClickEvent.copyToClipboard(copyCommand));
+                .clickEvent(copyEvent);
 
         if (issue.createsAccount()) {
-            player.sendMessage(created.append(Component.space()).append(withJoinGroup(copy)));
+            Component line = messages.component("qq.bind.register_header", NamedTextColor.GREEN)
+                    .append(Component.newline())
+                    .append(CommandHelper.withHighlightedCommand(
+                            message, copyCommand, NamedTextColor.GREEN, NamedTextColor.GOLD,
+                            copyEvent))
+                    .append(Component.space())
+                    .append(withJoinGroup(copy));
+            player.sendMessage(line);
             return;
         }
 
-        player.sendMessage(created);
-        Component manual = messages.component("qq.bind.manual", NamedTextColor.YELLOW, issue.code())
-                .clickEvent(ClickEvent.copyToClipboard(copyCommand));
-        player.sendMessage(manual.append(Component.space()).append(withJoinGroup(copy)));
+        player.sendMessage(message);
+        Component manual = messages.component("qq.bind.manual", NamedTextColor.YELLOW, issue.code());
+        Component manualLine = CommandHelper.withHighlightedCommand(
+                manual, copyCommand, NamedTextColor.YELLOW, NamedTextColor.GOLD, copyEvent);
+        player.sendMessage(manualLine.append(Component.space()).append(withJoinGroup(copy)));
     }
 
     private Component withJoinGroup(Component copy) {

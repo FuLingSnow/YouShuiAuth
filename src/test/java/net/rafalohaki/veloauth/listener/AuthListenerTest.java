@@ -131,7 +131,7 @@ class AuthListenerTest {
         when(settings.getFloodgateUsernamePrefix()).thenReturn(".");
         when(settings.captureOperationSettings()).thenAnswer(ignored -> new Settings.OperationSettings(
                 new Settings.PasswordSettings(10, 3, 8, 72, new Settings.PasswordPolicy(), true, true,
-                        false, 7, true, true, false, false),
+                        false, 7, true, true, false, false, true, false),
                 new Settings.BruteForceSettings(5, 5, 168),
                 new Settings.PremiumSettings(
                         settings.isPremiumCheckEnabled(),

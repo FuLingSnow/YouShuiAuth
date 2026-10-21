@@ -42,7 +42,7 @@ class TestValidationSettings extends Settings {
     @Override
     public PasswordSettings getPasswordSettings() {
         return new PasswordSettings(10, ipLimitRegistrations, minLen, maxLen, policy, true, true,
-                false, 7, true, true, false, false);
+                false, 7, true, true, false, false, true, false);
     }
 
     void setIpLimitRegistrationsForTesting(int limit) {

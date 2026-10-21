@@ -155,6 +155,10 @@ security:
   allow-qq-set-password: false
   # 禁止已绑定 QQ 的账号使用密码登录（即使已设置密码）
   deny-qq-password-login: false
+  # 已绑定 QQ 的账号是否允许免密（Cookie）自动登录
+  auto-login-qq-enabled: true
+  # 仅密码账号（未绑定 QQ）是否允许免密自动登录；默认关闭，只让 QQ 账号免密
+  auto-login-password-enabled: false
   # 临时封禁前的最大登录失败次数
   bruteforce-max-attempts: 5
   # 封禁时长（分钟）

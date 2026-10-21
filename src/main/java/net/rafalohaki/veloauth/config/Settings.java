@@ -336,6 +336,14 @@ public class Settings {
         return activeSnapshot().password().denyQqPasswordLogin();
     }
 
+    public boolean isAutoLoginQqEnabled() {
+        return activeSnapshot().password().autoLoginQqEnabled();
+    }
+
+    public boolean isAutoLoginPasswordEnabled() {
+        return activeSnapshot().password().autoLoginPasswordEnabled();
+    }
+
     public boolean isPremiumCheckEnabled() {
         return activeSnapshot().premium().isCheckEnabled();
     }
@@ -733,7 +741,9 @@ public class Settings {
             boolean autoLoginRequireSameSubnet,
             boolean autoLoginFingerprintRequired,
             boolean qqSetPasswordEnabled,
-            boolean denyQqPasswordLogin) {
+            boolean denyQqPasswordLogin,
+            boolean autoLoginQqEnabled,
+            boolean autoLoginPasswordEnabled) {
     }
 
     /** Immutable connection tuning captured once by a transfer operation. */
@@ -829,7 +839,7 @@ public class Settings {
                             new EmbeddedAuthServerSettings()),
                     new ConnectionSettings(30, 3000, 1500),
                     new PasswordSettings(10, 3, 8, 72, new PasswordPolicy(), true, true,
-                            false, 7, true, true, false, false),
+                            false, 7, true, true, false, false, true, false),
                     new BruteForceSettings(5, 5, 168),
                     new PremiumSettings(),
                     new FloodgateSettings(),
@@ -873,7 +883,9 @@ public class Settings {
                             password.autoLoginRequireSameSubnet,
                             password.autoLoginFingerprintRequired,
                             password.qqSetPasswordEnabled,
-                            password.denyQqPasswordLogin),
+                            password.denyQqPasswordLogin,
+                            password.autoLoginQqEnabled,
+                            password.autoLoginPasswordEnabled),
                     bruteForce, premium, floodgate, alerts, auditLog, twoFactor, qq, hot);
         }
 

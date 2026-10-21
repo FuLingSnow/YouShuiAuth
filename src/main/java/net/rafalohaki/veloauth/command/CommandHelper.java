@@ -3,7 +3,10 @@ package net.rafalohaki.veloauth.command;
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.proxy.Player;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import net.rafalohaki.veloauth.config.Settings;
 import net.rafalohaki.veloauth.i18n.Messages;
 import net.rafalohaki.veloauth.util.PlayerAddressUtils;
@@ -24,6 +27,28 @@ public final class CommandHelper {
 
     private CommandHelper() {
         // Utility class - prevent instantiation
+    }
+
+    /**
+     * Repaints {@code command} inside {@code line} with {@code highlight} so players can spot the
+     * exact text they must send. The optional click event is applied to every segment.
+     */
+    static Component withHighlightedCommand(Component line, String command, NamedTextColor base,
+            NamedTextColor highlight, ClickEvent click) {
+        String plain = PlainTextComponentSerializer.plainText().serialize(line);
+        int index = plain.indexOf(command);
+        if (index < 0) {
+            return click == null ? line : line.clickEvent(click);
+        }
+        Component before = Component.text(plain.substring(0, index), base);
+        Component middle = Component.text(command, highlight);
+        Component after = Component.text(plain.substring(index + command.length()), base);
+        if (click != null) {
+            before = before.clickEvent(click);
+            middle = middle.clickEvent(click);
+            after = after.clickEvent(click);
+        }
+        return before.append(middle).append(after);
     }
 
     /**

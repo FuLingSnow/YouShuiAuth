@@ -305,6 +305,10 @@ final class SettingsLoader {
                 "allow-qq-set-password", state.qqSetPasswordEnabled);
         state.denyQqPasswordLogin = YamlParserUtils.getBoolean(security,
                 "deny-qq-password-login", state.denyQqPasswordLogin);
+        state.autoLoginQqEnabled = YamlParserUtils.getBoolean(security,
+                "auto-login-qq-enabled", state.autoLoginQqEnabled);
+        state.autoLoginPasswordEnabled = YamlParserUtils.getBoolean(security,
+                "auto-login-password-enabled", state.autoLoginPasswordEnabled);
         state.bruteForceMaxAttempts = YamlParserUtils.getInt(security,
                 "bruteforce-max-attempts", state.bruteForceMaxAttempts);
         state.bruteForceTimeoutMinutes = YamlParserUtils.getInt(security,
@@ -639,6 +643,8 @@ final class SettingsLoader {
         boolean autoLoginFingerprintRequired;
         boolean qqSetPasswordEnabled;
         boolean denyQqPasswordLogin;
+        boolean autoLoginQqEnabled;
+        boolean autoLoginPasswordEnabled;
         int bruteForceMaxAttempts;
         int bruteForceTimeoutMinutes;
         int ipLimitRegistrations;
@@ -693,20 +699,7 @@ final class SettingsLoader {
             pingTimeoutMillis = connection.pingTimeoutMillis();
             autoTransferDelayMillis = connection.autoTransferDelayMillis();
 
-            Settings.PasswordSettings password = snapshot.password();
-            bcryptCost = password.bcryptCost();
-            registrationEnabled = password.registrationEnabled();
-            passwordChangeEnabled = password.passwordChangeEnabled();
-            autoLoginEnabled = password.autoLoginEnabled();
-            autoLoginMaxAgeDays = password.autoLoginMaxAgeDays();
-            autoLoginRequireSameSubnet = password.autoLoginRequireSameSubnet();
-            autoLoginFingerprintRequired = password.autoLoginFingerprintRequired();
-            qqSetPasswordEnabled = password.qqSetPasswordEnabled();
-            denyQqPasswordLogin = password.denyQqPasswordLogin();
-            ipLimitRegistrations = password.ipLimitRegistrations();
-            minPasswordLength = password.minLength();
-            maxPasswordLength = password.maxLength();
-            passwordPolicy = password.policy();
+            copyPasswordSettings(snapshot.password());
 
             Settings.BruteForceSettings bruteForce = snapshot.bruteForce();
             bruteForceMaxAttempts = bruteForce.maxAttempts();
@@ -726,6 +719,24 @@ final class SettingsLoader {
             reportIncludeLogs = hot.reportIncludeLogs();
             language = hot.language();
             detectClientLanguage = hot.detectClientLanguage();
+        }
+
+        private void copyPasswordSettings(Settings.PasswordSettings password) {
+            bcryptCost = password.bcryptCost();
+            registrationEnabled = password.registrationEnabled();
+            passwordChangeEnabled = password.passwordChangeEnabled();
+            autoLoginEnabled = password.autoLoginEnabled();
+            autoLoginMaxAgeDays = password.autoLoginMaxAgeDays();
+            autoLoginRequireSameSubnet = password.autoLoginRequireSameSubnet();
+            autoLoginFingerprintRequired = password.autoLoginFingerprintRequired();
+            qqSetPasswordEnabled = password.qqSetPasswordEnabled();
+            denyQqPasswordLogin = password.denyQqPasswordLogin();
+            autoLoginQqEnabled = password.autoLoginQqEnabled();
+            autoLoginPasswordEnabled = password.autoLoginPasswordEnabled();
+            ipLimitRegistrations = password.ipLimitRegistrations();
+            minPasswordLength = password.minLength();
+            maxPasswordLength = password.maxLength();
+            passwordPolicy = password.policy();
         }
 
         Settings.Snapshot build() {
@@ -771,7 +782,9 @@ final class SettingsLoader {
                             autoLoginRequireSameSubnet,
                             autoLoginFingerprintRequired,
                             qqSetPasswordEnabled,
-                            denyQqPasswordLogin),
+                            denyQqPasswordLogin,
+                            autoLoginQqEnabled,
+                            autoLoginPasswordEnabled),
                     new Settings.BruteForceSettings(
                             bruteForceMaxAttempts,
                             bruteForceTimeoutMinutes,

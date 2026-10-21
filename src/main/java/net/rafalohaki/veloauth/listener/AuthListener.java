@@ -1233,8 +1233,46 @@ public class AuthListener {
         startLimboFlow(player, operation);
     }
 
+    private static long elapsedMillis(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000L;
+    }
+
+    private boolean autoLoginAllowedForAccount(Player player, QqAuthService service) {
+        boolean qqAccount = service != null && service.isAccountQqBound(player);
+        boolean allowed = qqAccount
+                ? settings.isAutoLoginQqEnabled()
+                : settings.isAutoLoginPasswordEnabled();
+        if (!allowed && logger.isDebugEnabled()) {
+            logger.debug("Auto-login disabled for {} ({}-login account)",
+                    player.getUsername(), qqAccount ? "qq" : "password");
+        }
+        return allowed;
+    }
+
+    private void attemptFingerprintAutoLogin(
+            Player player, Operation operation, QqAuthService service, long startedAt) {
+        String fingerprint = service == null ? null
+                : DeviceFingerprints.fingerprint(
+                        player, settings.isAutoLoginRequireSameSubnet());
+        if (service == null || !service.tryDeviceLogin(player, fingerprint)) {
+            startLimboFlow(player, operation);
+            return;
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("Auto-login device check for {} took {} ms",
+                    player.getUsername(), elapsedMillis(startedAt));
+        }
+        connectionLifecycleRegistry.runIfCurrent(operation,
+                () -> connectionManager.autoTransferFromAuthServerToBackend(player));
+        if (logger.isDebugEnabled()) {
+            logger.debug("Auto-login scheduled backend transfer for {} after {} ms",
+                    player.getUsername(), elapsedMillis(startedAt));
+        }
+    }
+
     /** Skips limbo when the last successful login matches device fingerprint and subnet. */
     private void attemptAutoLogin(Player player, Operation operation) {
+        long startedAt = System.nanoTime();
         databaseManager.findPlayerByNickname(player.getUsername())
                 .thenAccept(dbResult -> {
                     RegisteredPlayer account = (dbResult != null && !dbResult.isDatabaseError())
@@ -1243,26 +1281,13 @@ public class AuthListener {
                         startLimboFlow(player, operation);
                         return;
                     }
-                    // tryDeviceLogin authorizes the connection when the stored fingerprint matches.
-                    if (settings.isAutoLoginFingerprintRequired()) {
-                        QqAuthService service = plugin.getQqAuthService();
-                        String fingerprint = service == null ? null
-                                : DeviceFingerprints.fingerprint(
-                                        player, settings.isAutoLoginRequireSameSubnet());
-                        if (service == null || !service.tryDeviceLogin(player, fingerprint)) {
-                            startLimboFlow(player, operation);
-                            return;
-                        }
-                        boolean transferred = connectionLifecycleRegistry.runIfCurrent(operation,
-                                () -> connectionManager.transferToBackend(player));
-                        if (transferred) {
-                            return;
-                        }
-                        connectionLifecycleRegistry.runIfCurrent(operation, () -> {
-                            authCache.removeAuthorizedPlayer(player.getUniqueId());
-                            authCache.endSession(player.getUniqueId());
-                        });
+                    QqAuthService service = plugin.getQqAuthService();
+                    if (!autoLoginAllowedForAccount(player, service)) {
                         startLimboFlow(player, operation);
+                        return;
+                    }
+                    if (settings.isAutoLoginFingerprintRequired()) {
+                        attemptFingerprintAutoLogin(player, operation, service, startedAt);
                         return;
                     }
                     // Subnet-only mode: authorize straight away.

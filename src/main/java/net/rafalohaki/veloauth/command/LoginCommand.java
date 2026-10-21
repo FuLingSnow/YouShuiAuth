@@ -83,11 +83,14 @@ class LoginCommand implements SimpleCommand {
             player.sendMessage(ctx.messages().component("qq.login.code_wait", NamedTextColor.YELLOW));
             return;
         }
-        Component hint = ctx.messages().component(
-                "qq.login.code_hint", NamedTextColor.AQUA,
-                code.get(), service.getLoginCodeTtlSeconds());
+        String loginCommand = "/登录 " + code.get();
+        ClickEvent copyEvent = ClickEvent.copyToClipboard(loginCommand);
+        Component hint = CommandHelper.withHighlightedCommand(
+                ctx.messages().component("qq.login.code_hint", NamedTextColor.AQUA,
+                        code.get(), service.getLoginCodeTtlSeconds()),
+                loginCommand, NamedTextColor.AQUA, NamedTextColor.GOLD, copyEvent);
         Component copy = ctx.messages().component("qq.login.copy", NamedTextColor.AQUA)
-                .clickEvent(ClickEvent.copyToClipboard("/登录 " + code.get()));
+                .clickEvent(copyEvent);
         player.sendMessage(hint.append(Component.space()).append(copy));
     }
 
