@@ -11,8 +11,8 @@
 <div align="center">
 
 ![Velocity](https://img.shields.io/badge/Velocity-4.x-blue)
-![Version](https://img.shields.io/badge/version-v1.1.0-blue)
-![License](https://img.shields.io/badge/license-AGPL--3.0-red)
+![Version](https://img.shields.io/badge/version-v1.1.1-blue)
+![License](https://img.shields.io/badge/license-AGPL--3.0--only-red)
 [![Build and release](https://github.com/FuLingSnow/youshuiauth/actions/workflows/build-and-release.yml/badge.svg)](https://github.com/FuLingSnow/youshuiauth/actions/workflows/build-and-release.yml)
 
 </div>
@@ -63,7 +63,7 @@ https://github.com/FuLingSnow/youshuiauth/releases/latest/download/YouShuiAuth-l
 
 ### 方式一：手动安装
 
-将 `YouShuiAuth-1.1.0.jar` 放入 Velocity 的 `plugins/` 目录，重启代理即可。首次启动自动生成 `config.yml` 与多语言文件。
+将 `YouShuiAuth-1.1.1.jar` 放入 Velocity 的 `plugins/` 目录，重启代理即可。首次启动自动生成 `config.yml` 与多语言文件。
 
 下载后可校验发布包完整性：
 
@@ -223,7 +223,7 @@ YouShuiAuth/
 
 ## 开源许可
 
-本项目基于 [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE) 协议开源。
+本项目基于 [GNU Affero General Public License v3.0 (AGPL-3.0-only)](./LICENSE) 协议开源。
 
 项目包含来自 [VeloAuth](https://github.com/rafalohaki/VeloAuth) 的代码（MIT，见 [LICENSE.VeloAuth](./LICENSE.VeloAuth)），依照其许可要求保留原始版权声明。
 
