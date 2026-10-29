@@ -1,0 +1,108 @@
+package io.github.fulingsnow.youshuiauth.qq;
+
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+/**
+ * Restart-scoped configuration for the QQ binding / quick-login bridge.
+ *
+ * <p>The bridge is opt-in: {@code enabled=false} must leave every existing authentication
+ * path untouched (no HTTP listener, no commands, no scheduled work).
+ *
+ * @param enabled              master switch
+ * @param bindAddress          loopback address the internal HTTP bridge binds to
+ * @param port                 internal HTTP bridge port
+ * @param sharedSecret         HMAC secret shared with the AstrBot plugin (>= 32 chars)
+ * @param allowedGroups        QQ group ids allowed to bind / confirm logins; empty denies all
+ * @param bindCodeTtlSeconds   lifetime of a {@code /qqbind} code
+ * @param loginCodeTtlSeconds  lifetime of a limbo quick-login code
+ * @param maxAttemptsPerMinute per-QQ attempt ceiling for the bridge endpoints
+ * @param joinUrl              optional QQ group invite link shown by {@code /qqbind}
+ * @param deviceApprovalEnabled when true, a mismatching device fingerprint waits for a Y/N
+ *                              confirmation in the bound QQ group instead of falling back to limbo
+ * @param deviceApprovalTimeoutSeconds confirmation window; afterwards the normal limbo login
+ *                              flow resumes
+ */
+public record QqSettings(
+        boolean enabled,
+        String bindAddress,
+        int port,
+        String sharedSecret,
+        Set<String> allowedGroups,
+        int bindCodeTtlSeconds,
+        int loginCodeTtlSeconds,
+        int maxAttemptsPerMinute,
+        String joinUrl,
+        boolean deviceApprovalEnabled,
+        int deviceApprovalTimeoutSeconds) {
+
+    @SuppressWarnings("PMD.AvoidUsingHardCodedIP")
+    public static final String DEFAULT_BIND_ADDRESS = "127.0.0.1";
+    public static final int DEFAULT_PORT = 8765;
+    public static final int DEFAULT_BIND_CODE_TTL_SECONDS = 300;
+    public static final int DEFAULT_LOGIN_CODE_TTL_SECONDS = 120;
+    public static final int DEFAULT_MAX_ATTEMPTS_PER_MINUTE = 5;
+    public static final int DEFAULT_DEVICE_APPROVAL_TIMEOUT_SECONDS = 120;
+
+    public QqSettings() {
+        this(false, DEFAULT_BIND_ADDRESS, DEFAULT_PORT, "", Set.of(),
+                DEFAULT_BIND_CODE_TTL_SECONDS, DEFAULT_LOGIN_CODE_TTL_SECONDS,
+                DEFAULT_MAX_ATTEMPTS_PER_MINUTE, "",
+                false, DEFAULT_DEVICE_APPROVAL_TIMEOUT_SECONDS);
+    }
+
+    public QqSettings {
+        bindAddress = bindAddress == null || bindAddress.isBlank()
+                ? DEFAULT_BIND_ADDRESS
+                : bindAddress.trim();
+        sharedSecret = sharedSecret == null ? "" : sharedSecret;
+        joinUrl = joinUrl == null ? "" : joinUrl.trim();
+        allowedGroups = allowedGroups == null
+                ? Set.of()
+                : java.util.Collections.unmodifiableSet(new LinkedHashSet<>(allowedGroups));
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public String getBindAddress() {
+        return bindAddress;
+    }
+
+    public int getPort() {
+        return port;
+    }
+
+    public String getSharedSecret() {
+        return sharedSecret;
+    }
+
+    public Set<String> getAllowedGroups() {
+        return allowedGroups;
+    }
+
+    public int getBindCodeTtlSeconds() {
+        return bindCodeTtlSeconds;
+    }
+
+    public int getLoginCodeTtlSeconds() {
+        return loginCodeTtlSeconds;
+    }
+
+    public int getMaxAttemptsPerMinute() {
+        return maxAttemptsPerMinute;
+    }
+
+    public String getJoinUrl() {
+        return joinUrl;
+    }
+
+    public boolean isDeviceApprovalEnabled() {
+        return deviceApprovalEnabled;
+    }
+
+    public int getDeviceApprovalTimeoutSeconds() {
+        return deviceApprovalTimeoutSeconds;
+    }
+}
