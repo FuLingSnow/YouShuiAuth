@@ -1,0 +1,173 @@
+package io.github.fulingsnow.youshuiauth.util;
+
+import com.velocitypowered.api.command.CommandSource;
+import com.velocitypowered.api.proxy.Player;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import io.github.fulingsnow.youshuiauth.database.DatabaseManager.DbResult;
+import io.github.fulingsnow.youshuiauth.i18n.Messages;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.Logger;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+
+/**
+ * Unit tests for {@link DatabaseErrorHandler}.
+ * <p>
+ * Verifies the contract:
+ * <ul>
+ *   <li>{@code isDatabaseError() == false} → returns {@code false}, no logging, no player message.</li>
+ *   <li>{@code isDatabaseError() == true} → returns {@code true}, logs with SECURITY marker,
+ *       sends localized error component to the player/source.</li>
+ *   <li>Custom error key is honored by {@code handleErrorWithKey}.</li>
+ * </ul>
+ */
+@ExtendWith(MockitoExtension.class)
+class DatabaseErrorHandlerTest {
+
+    @Mock
+    private Player player;
+
+    @Mock
+    private CommandSource commandSource;
+
+    @Mock
+    private Logger logger;
+
+    @Mock
+    private Messages messages;
+
+    private static final String OPERATION = "Test operation";
+
+    private static final String DEFAULT_MESSAGE_ID = "error.database." + "query";
+    private static final String CUSTOM_MESSAGE_ID = "error.database." + "custom";
+
+    private static DbResult<Object> successResult() {
+        return DbResult.success("ok");
+    }
+
+    private static DbResult<Object> errorResult() {
+        return DbResult.databaseError("connection refused");
+    }
+
+    @Test
+    void handleErrorPlayer_successResult_returnsFalseAndDoesNotInteract() {
+        boolean handled = VelocityDatabaseErrorHandler.handleError(
+                successResult(), player, OPERATION, logger, messages);
+
+        assertFalse(handled);
+        verify(player, never()).sendMessage(any(Component.class));
+        verify(logger, never()).error(any(org.slf4j.Marker.class), any(String.class), any(), any(), any());
+        verifyNoInteractions(messages);
+    }
+
+    @Test
+    void handleErrorPlayer_errorResult_logsAndSendsLocalizedError() {
+        when(logger.isErrorEnabled()).thenReturn(true);
+        when(player.getUsername()).thenReturn("alice");
+        Component localizedError = Component.text("Database error, please try again.", NamedTextColor.RED);
+        when(messages.component(DEFAULT_MESSAGE_ID, NamedTextColor.RED)).thenReturn(localizedError);
+
+        boolean handled = VelocityDatabaseErrorHandler.handleError(
+                errorResult(), player, OPERATION, logger, messages);
+
+        assertTrue(handled);
+        verify(messages).component(DEFAULT_MESSAGE_ID, NamedTextColor.RED);
+        verify(player).sendMessage(localizedError);
+    }
+
+    @Test
+    void handleErrorPlayer_errorResult_logIncludesOperationAndIdentifier() {
+        when(logger.isErrorEnabled()).thenReturn(true);
+        when(player.getUsername()).thenReturn("alice");
+
+        VelocityDatabaseErrorHandler.handleError(errorResult(), player, OPERATION, logger, messages);
+
+        ArgumentCaptor<String> opCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> idCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> msgCaptor = ArgumentCaptor.forClass(String.class);
+        verify(logger).error(any(org.slf4j.Marker.class),
+                eq("[DATABASE ERROR] {} failed for {}: {}"),
+                opCaptor.capture(), idCaptor.capture(), msgCaptor.capture());
+        assertTrue(opCaptor.getValue().equals(OPERATION));
+        assertTrue(idCaptor.getValue().equals("alice"));
+        assertTrue(msgCaptor.getValue().contains("connection refused"));
+    }
+
+    @Test
+    void handleErrorCommandSource_successResult_returnsFalseAndDoesNotInteract() {
+        boolean handled = VelocityDatabaseErrorHandler.handleError(
+                successResult(), commandSource, "alice", OPERATION, logger, messages);
+
+        assertFalse(handled);
+        verify(commandSource, never()).sendMessage(any(Component.class));
+        verifyNoInteractions(messages);
+    }
+
+    @Test
+    void handleErrorCommandSource_errorResult_logsAndSendsLocalizedError() {
+        when(logger.isErrorEnabled()).thenReturn(true);
+        Component localizedError = Component.text("Database error", NamedTextColor.RED);
+        when(messages.component(DEFAULT_MESSAGE_ID, NamedTextColor.RED)).thenReturn(localizedError);
+
+        boolean handled = VelocityDatabaseErrorHandler.handleError(
+                errorResult(), commandSource, "alice", OPERATION, logger, messages);
+
+        assertTrue(handled);
+        verify(messages).component(DEFAULT_MESSAGE_ID, NamedTextColor.RED);
+        verify(commandSource).sendMessage(localizedError);
+    }
+
+    @Test
+    void handleErrorWithKey_successResult_returnsFalseAndDoesNotInteract() {
+        boolean handled = VelocityDatabaseErrorHandler.handleErrorWithKey(
+                successResult(), player, OPERATION, logger, messages, CUSTOM_MESSAGE_ID);
+
+        assertFalse(handled);
+        verify(player, never()).sendMessage(any(Component.class));
+        verifyNoInteractions(messages);
+    }
+
+    @Test
+    void handleErrorWithKey_errorResult_usesCustomKeyNotDefault() {
+        when(logger.isErrorEnabled()).thenReturn(true);
+        when(player.getUsername()).thenReturn("alice");
+        Component localizedError = Component.text("Custom error", NamedTextColor.RED);
+        when(messages.component(CUSTOM_MESSAGE_ID, NamedTextColor.RED)).thenReturn(localizedError);
+
+        boolean handled = VelocityDatabaseErrorHandler.handleErrorWithKey(
+                errorResult(), player, OPERATION, logger, messages, CUSTOM_MESSAGE_ID);
+
+        assertTrue(handled);
+        verify(messages).component(CUSTOM_MESSAGE_ID, NamedTextColor.RED);
+        verify(messages, never()).component(DEFAULT_MESSAGE_ID, NamedTextColor.RED);
+        verify(player).sendMessage(localizedError);
+    }
+
+    @Test
+    void handleErrorWithKey_loggerErrorDisabled_doesNotLogButStillSends() {
+        when(logger.isErrorEnabled()).thenReturn(false);
+        when(player.getUsername()).thenReturn("alice");
+        Component localizedError = Component.text("Custom error", NamedTextColor.RED);
+        when(messages.component(CUSTOM_MESSAGE_ID, NamedTextColor.RED)).thenReturn(localizedError);
+
+        boolean handled = VelocityDatabaseErrorHandler.handleErrorWithKey(
+                errorResult(), player, OPERATION, logger, messages, CUSTOM_MESSAGE_ID);
+
+        assertTrue(handled);
+
+        verify(player).sendMessage(localizedError);
+        verify(logger, never()).error(any(org.slf4j.Marker.class), any(String.class), any(), any(), any());
+    }
+}

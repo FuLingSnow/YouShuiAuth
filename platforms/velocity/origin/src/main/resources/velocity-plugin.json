@@ -1,0 +1,16 @@
+{
+  "id": "youshuiauth",
+  "name": "YouShuiAuth",
+  "version": "${project.version}",
+  "description": "Velocity 代理认证插件：BCrypt 密码、虚拟线程与多种数据库支持",
+  "authors": [
+    "FuLingSnow"
+  ],
+  "main": "io.github.fulingsnow.youshuiauth.YouShuiAuth",
+  "dependencies": [
+    {
+      "id": "floodgate",
+      "optional": true
+    }
+  ]
+}

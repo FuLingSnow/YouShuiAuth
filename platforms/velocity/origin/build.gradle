@@ -1,0 +1,178 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '8.3.5'
+}
+
+group = 'io.github.fulingsnow'
+version = '${mod_version}'
+
+def mcProtocolLibVersion = '26.2-20260809.160751-16'
+def nettyVersion = '4.2.18.Final'
+def viaVersion = '5.11.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(${java_version})
+    }
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+    maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+    maven { url = 'https://repo.opencollab.dev/main/' }
+    maven { url = 'https://repo.opencollab.dev/maven-snapshots/' }
+    maven { url = 'https://repo.viaversion.com/' }
+}
+
+// 构建期令牌替换：velocity-plugin.json、lang 资源、embedded-runtime.properties 与 BuildConstants 模板。
+def buildTokens = [
+        'project.version'                  : project.version.toString(),
+        'embedded.build.channel'           : 'stable',
+        'mcprotocollib.version'            : mcProtocolLibVersion,
+        'mcprotocollib.resolved-version'   : mcProtocolLibVersion,
+        'mcprotocollib.sha256'             : '07ec18ba92c8b4041286eeff2470e08257fd1f383881515cba4a0a9bf6fa98c1',
+        'viaversion.runtime.version'       : viaVersion,
+        'viaversion.runtime.url'           : "https://repo.viaversion.com/com/viaversion/viaversion-common/${viaVersion}/viaversion-common-${viaVersion}.jar",
+        'viaversion.runtime.sha256'        : 'a4dd9f63257ed923f73a64ecece31010acd04247db12855383172e1226912b3e',
+        'viaversion.runtime.dependency-version': viaVersion,
+        'viaversion.reviewed.version'      : viaVersion,
+        'viaversion.reviewed.url'          : "https://repo.viaversion.com/com/viaversion/viaversion-common/${viaVersion}/viaversion-common-${viaVersion}.jar",
+        'viaversion.reviewed.sha256'       : 'a4dd9f63257ed923f73a64ecece31010acd04247db12855383172e1226912b3e',
+].collectEntries { key, value -> [key, value.toString()] }
+
+def substituteTokens = { String line ->
+    def result = line
+    buildTokens.each { key, value -> result = result.replace('${' + key + '}', value) }
+    result
+}
+
+def generateBuildConstants = tasks.register('generateBuildConstants', Copy) {
+    from('src/main/java-templates') {
+        include '**/*.java'
+        filter(substituteTokens)
+    }
+    into layout.buildDirectory.dir('generated/sources/java-templates')
+}
+
+sourceSets.main.java.srcDir(generateBuildConstants.map { it.destinationDir })
+tasks.named('compileJava') { dependsOn generateBuildConstants }
+
+// 产物内嵌 AGPL 全文与 YouShuiAuth(MIT) 通知。
+def bundleLicenses = tasks.register('bundleLicenses', Copy) {
+    from(projectDir.toPath().resolve('../../..').toFile()) {
+        include 'LICENSE', 'THIRD_PARTY_NOTICES.md'
+        into 'META-INF/youshuiauth'
+    }
+    from(projectDir.toPath().resolve('../../..').toFile()) {
+        include 'LICENSE.YouShuiAuth'
+        into 'META-INF/licenses'
+    }
+    into layout.buildDirectory.dir('generated/licenses')
+}
+
+sourceSets.main.resources.srcDir(bundleLicenses.map { it.destinationDir })
+
+processResources {
+    filesMatching(['velocity-plugin.json', 'lang/messages_*.properties',
+                   'META-INF/youshuiauth/embedded-runtime.properties']) {
+        filter { String line ->
+            def result = line
+            buildTokens.each { k, v -> result = result.replace('${' + k + '}', v) }
+            result
+        }
+    }
+}
+
+dependencies {
+    compileOnly('com.velocitypowered:velocity-api:3.5.0-SNAPSHOT') {
+        exclude group: 'net.kyori'
+    }
+    compileOnly 'org.slf4j:slf4j-api:2.0.20'
+    compileOnly 'jakarta.inject:jakarta.inject-api:2.0.1'
+    compileOnly 'net.kyori:adventure-api:4.26.1'
+    compileOnly 'net.kyori:adventure-key:4.26.1'
+    compileOnly 'net.kyori:adventure-text-serializer-gson:4.26.1'
+    compileOnly 'net.kyori:adventure-text-serializer-legacy:4.26.1'
+    compileOnly 'net.kyori:adventure-text-serializer-plain:4.26.1'
+    compileOnly 'com.google.code.gson:gson:2.13.2'
+    compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
+    compileOnly 'org.spongepowered:configurate-core:4.2.0'
+    compileOnly 'org.spongepowered:configurate-yaml:4.2.0'
+    compileOnly "io.netty:netty-common:${nettyVersion}"
+    compileOnly "io.netty:netty-buffer:${nettyVersion}"
+    compileOnly "io.netty:netty-transport:${nettyVersion}"
+    compileOnly "io.netty:netty-codec-base:${nettyVersion}"
+    compileOnly "io.netty:netty-handler:${nettyVersion}"
+    compileOnly "com.viaversion:viaversion-common:${viaVersion}"
+
+    implementation "io.github.fulingsnow:youshuiauth-core:${mod_version}"
+    implementation 'com.j256.ormlite:ormlite-jdbc:6.1'
+    implementation 'com.mysql:mysql-connector-j:9.5.0'
+    implementation 'org.postgresql:postgresql:42.7.13'
+    implementation 'com.h2database:h2:2.4.240'
+    implementation 'org.xerial:sqlite-jdbc:3.51.1.0'
+    implementation 'at.favre.lib:bcrypt:0.10.2'
+    implementation 'com.zaxxer:HikariCP:6.3.0'
+    implementation 'com.github.ben-manes.caffeine:caffeine:3.2.4'
+    implementation 'org.bstats:bstats-velocity:3.2.1'
+    implementation 'org.bstats:bstats-base:3.2.1'
+    implementation 'org.cloudburstmc.math:immutable:2.0'
+    implementation("org.geysermc.mcprotocollib:protocol:${mcProtocolLibVersion}") {
+        exclude group: 'io.netty'
+        exclude group: 'com.google.protobuf'
+    }
+
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.12.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.12.0'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.12.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.0'
+    testImplementation 'org.mockito:mockito-core:5.12.0'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.12.0'
+    testImplementation 'org.slf4j:slf4j-simple:2.0.18'
+    testImplementation('com.velocitypowered:velocity-api:3.5.0-SNAPSHOT') {
+        exclude group: 'net.kyori'
+    }
+    testImplementation 'net.kyori:adventure-api:4.26.1'
+    testImplementation 'net.kyori:adventure-text-serializer-plain:4.26.1'
+    testImplementation 'net.kyori:adventure-text-serializer-legacy:4.26.1'
+    testImplementation 'net.kyori:adventure-text-serializer-gson:4.26.1'
+    testImplementation 'net.kyori:adventure-text-minimessage:4.26.1'
+    testImplementation "com.viaversion:viaversion-common:${viaVersion}"
+    testImplementation "io.netty:netty-common:${nettyVersion}"
+    testImplementation "io.netty:netty-buffer:${nettyVersion}"
+    testImplementation "io.netty:netty-transport:${nettyVersion}"
+    testImplementation "io.netty:netty-codec-base:${nettyVersion}"
+    testImplementation "io.netty:netty-handler:${nettyVersion}"
+}
+
+configurations.configureEach {
+    resolutionStrategy {
+        force 'net.kyori:adventure-api:4.26.1',
+                'net.kyori:adventure-key:4.26.1',
+                'net.kyori:adventure-text-serializer-gson:4.26.1',
+                'net.kyori:adventure-text-serializer-legacy:4.26.1',
+                'net.kyori:adventure-text-serializer-plain:4.26.1'
+    }
+}
+
+tasks.named('test', Test) {
+    workingDir = projectDir
+    if (!providers.gradleProperty('withDatabaseIt').isPresent()) {
+        exclude '**/*IT.class'
+    }
+    useJUnitPlatform()
+    testLogging { events 'failed' }
+}
+
+shadowJar {
+    // 平台产物统一命名 YouShuiAuth-<platform>-<version>.jar
+    archiveFileName = "YouShuiAuth-velocity-${mod_version}.jar"
+    mergeServiceFiles()
+    exclude 'org/slf4j/**'
+}
+
+// 只发布含依赖的可运行 jar，避免 thin jar 与产物名冲突。
+tasks.named('jar') { enabled = false }
+
+tasks.named('build') { dependsOn tasks.named('shadowJar') }
