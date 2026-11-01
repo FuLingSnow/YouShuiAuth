@@ -1,0 +1,55 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '8.3.5'
+}
+
+group = 'io.github.fulingsnow'
+version = '${mod_version}'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(${java_version})
+    }
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+    maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+    // paper-api 的传递依赖（cloudburstmc 等）只在 OpenCollab 仓库发布。
+    maven { url = 'https://repo.opencollab.dev/main/' }
+    maven { url = 'https://repo.opencollab.dev/maven-snapshots/' }
+}
+
+dependencies {
+    compileOnly "io.papermc.paper:paper-api:${mc_version}-R0.1-SNAPSHOT"
+    implementation "io.github.fulingsnow:youshuiauth-core:${mod_version}:all"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+// 产物内嵌 AGPL 全文与上游 YouShuiAuth(MIT) 通知，和 Velocity 产物保持一致。
+def bundleLicenses = tasks.register('bundleLicenses', Copy) {
+    from(projectDir.toPath().resolve('../../..').toFile()) {
+        include 'LICENSE', 'THIRD_PARTY_NOTICES.md'
+        into 'META-INF/youshuiauth'
+    }
+    from(projectDir.toPath().resolve('../../..').toFile()) {
+        include 'LICENSE.YouShuiAuth'
+        into 'META-INF/licenses'
+    }
+    into layout.buildDirectory.dir('generated/licenses')
+}
+
+sourceSets.main.resources.srcDir(bundleLicenses.map { it.destinationDir })
+
+shadowJar {
+    archiveFileName = "YouShuiAuth-paper-${mod_version}.jar"
+    mergeServiceFiles()
+    // 平台已有 slf4j；其余依赖（Hikari/ORMLite/驱动/BCrypt/Caffeine/Gson）随包。
+    exclude 'org/slf4j/**'
+}
+
+tasks.named('build') { dependsOn tasks.named('shadowJar') }

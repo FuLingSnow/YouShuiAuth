@@ -1,0 +1,42 @@
+name: YouShuiAuth
+version: '${mod_version}'
+main: io.github.fulingsnow.youshuiauth.paper.PaperPlugin
+api-version: '1.20'
+authors: [FuLingSnow]
+description: Paper 服务端认证（注册/登录/2FA/QQ），带冻结隔离区。
+commands:
+  login:
+    description: Log in with your password, or request a quick-login code
+    usage: /login [password]
+    aliases: [log, l]
+  register:
+    description: Register a new account
+    usage: /register <password> <confirm>
+    aliases: [reg]
+  changepassword:
+    description: Change your password
+    usage: /changepassword <old> <new>
+  setpassword:
+    description: Set a password for a QQ-only account
+    usage: /setpassword <password> <confirm>
+  logout:
+    description: End your authenticated session
+    usage: /logout
+  2fa:
+    description: Two-factor authentication
+    usage: /2fa <setup|verify|disable|qr|status>
+    aliases: [totp, twofa]
+  unregister:
+    description: Delete your account (password confirmation required)
+    usage: /unregister <password>
+  qqbind:
+    description: Bind your account to QQ
+    usage: /qqbind
+  ysauth:
+    description: Administrative commands
+    usage: /ysauth <subcommand>
+    aliases: [vauth]
+permissions:
+  youshuiauth.admin:
+    description: Access to administrative commands
+    default: op
