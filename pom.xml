@@ -4,9 +4,9 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>net.rafalohaki.veloauth</groupId>
-    <artifactId>veloauth</artifactId>
-    <version>1.1.1</version>
+    <groupId>io.github.fulingsnow</groupId>
+    <artifactId>youshuiauth</artifactId>
+    <version>2.0.0</version>
     <packaging>jar</packaging>
 
     <name>YouShuiAuth</name>
@@ -21,7 +21,7 @@
             <url>https://spdx.org/licenses/AGPL-3.0-only.html</url>
             <distribution>repo</distribution>
             <comments>Full text in LICENSE (also as LICENSES/AGPL-3.0-only.txt). Upstream
-                VeloAuth MIT notice retained in LICENSE.VeloAuth; third-party attributions
+                YouShuiAuth MIT notice retained in LICENSE.YouShuiAuth; third-party attributions
                 in THIRD_PARTY_NOTICES.md.</comments>
         </license>
     </licenses>
@@ -42,7 +42,7 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <!--
-          Reproducible embedded-limbo network engine. VeloAuth supplies its own minimal 1.8
+          Reproducible embedded-limbo network engine. YouShuiAuth supplies its own minimal 1.8
           PacketCodec and translates newer clients through the separately managed ViaVersion
           runtime. This immutable timestamped MCProtocolLib build is not a floating SNAPSHOT.
           Update only together with protocol/runtime tests and the recorded checksum.
@@ -54,11 +54,11 @@
         <embedded.netty.version>4.2.18.Final</embedded.netty.version>
         <!--
           The embedded protocol runtime is downloaded on first use, verified byte-for-byte and
-          loaded from VeloAuth's private runtime directory. The coordinate remains a compile-only
+          loaded from YouShuiAuth's private runtime directory. The coordinate remains a compile-only
           dependency so the main plugin JAR does not silently redistribute the separately licensed
           GPL-3.0 ViaVersion implementation. The normal build is pinned. A separately reviewed
           candidate may be recorded by maintainers for operator-opt-in staging; its digest is
-          embedded in the VeloAuth release and is never accepted from the artifact origin.
+          embedded in the YouShuiAuth release and is never accepted from the artifact origin.
         -->
         <viaversion.runtime.dependency-version>5.11.0</viaversion.runtime.dependency-version>
         <viaversion.runtime.version>5.11.0</viaversion.runtime.version>
@@ -114,7 +114,7 @@
         </dependency>
 
         <!--
-          Public proxy type universe. These APIs are used directly by VeloAuth and must resolve
+          Public proxy type universe. These APIs are used directly by YouShuiAuth and must resolve
           from Velocity at runtime; declaring them explicitly as provided prevents transitive
           compile scopes from accidentally bundling a second, incompatible copy.
         -->
@@ -180,7 +180,7 @@
             <artifactId>mysql-connector-j</artifactId>
             <version>9.5.0</version>
             <exclusions>
-                <!-- protobuf is only needed for X DevAPI, which VeloAuth never uses -->
+                <!-- protobuf is only needed for X DevAPI, which YouShuiAuth never uses -->
                 <exclusion>
                     <groupId>com.google.protobuf</groupId>
                     <artifactId>protobuf-java</artifactId>
@@ -228,7 +228,7 @@
         <!-- Caffeine: in-memory cache (W-TinyLFU, per-entry TTL, O(1) eviction)
              Used by AuthCache / SessionManager / BruteForceTracker / PremiumResolverService
              instead of hand-rolled LRU + ReentrantLock + scheduled cleanup. Relocated to
-             net.rafalohaki.veloauth.libs.caffeine in the shade plugin below to prevent
+             io.github.fulingsnow.youshuiauth.libs.caffeine in the shade plugin below to prevent
              classloader conflicts with any other Velocity plugin bundling Caffeine. -->
         <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>
@@ -290,7 +290,7 @@
                     <groupId>io.netty.incubator</groupId>
                     <artifactId>netty-incubator-transport-native-io_uring</artifactId>
                 </exclusion>
-                <!-- Client-side Microsoft authentication is unreachable in VeloAuth's
+                <!-- Client-side Microsoft authentication is unreachable in YouShuiAuth's
                      server-only, Velocity-forwarded login flow. -->
                 <exclusion>
                     <groupId>net.raphimc</groupId>
@@ -401,10 +401,18 @@
             <resource>
                 <directory>${project.basedir}</directory>
                 <filtering>false</filtering>
-                <targetPath>META-INF/veloauth</targetPath>
+                <targetPath>META-INF/youshuiauth</targetPath>
                 <includes>
                     <include>LICENSE</include>
                     <include>THIRD_PARTY_NOTICES.md</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>${project.basedir}</directory>
+                <filtering>false</filtering>
+                <targetPath>META-INF/licenses</targetPath>
+                <includes>
+                    <include>LICENSE.YouShuiAuth</include>
                 </includes>
             </resource>
         </resources>
@@ -449,7 +457,7 @@
                             <rules>
                                 <requireJavaVersion>
                                     <version>[21,)</version>
-                                    <message>VeloAuth requires JDK 21 or newer to build. Note: PMD currently has known issues with class files compiled by JDK 22+ (Unsupported class file major version). For PMD static analysis builds, use JDK 21 explicitly.</message>
+                                    <message>YouShuiAuth requires JDK 21 or newer to build. Note: PMD currently has known issues with class files compiled by JDK 22+ (Unsupported class file major version). For PMD static analysis builds, use JDK 21 explicitly.</message>
                                 </requireJavaVersion>
                             </rules>
                         </configuration>
@@ -670,15 +678,15 @@
                             <relocations>
                                 <relocation>
                                     <pattern>org.bstats</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.bstats</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.bstats</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>com.j256.ormlite</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.ormlite</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.ormlite</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>at.favre.lib.crypto</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.bcrypt</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.bcrypt</shadedPattern>
                                 </relocation>
                                 <!--
                                   at.favre.lib:bytes (transitive from bcrypt) lives outside the
@@ -687,11 +695,11 @@
                                 -->
                                 <relocation>
                                     <pattern>at.favre.lib.bytes</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.bytes</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.bytes</shadedPattern>
                                 </relocation>
                                 <!--
                                   HikariCP relocation prevents LinkageError when another Velocity plugin
-                                  bundles a different Hikari version. Safe because VeloAuth only uses the
+                                  bundles a different Hikari version. Safe because YouShuiAuth only uses the
                                   Hikari API via type imports (DatabaseConfig.java) — no string-FQN refs.
                                   JDBC drivers (postgresql, mysql, h2, sqlite) are NOT relocated:
                                   DatabaseType.java stores driver class names as string literals which
@@ -700,7 +708,7 @@
                                 -->
                                 <relocation>
                                     <pattern>com.zaxxer.hikari</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.hikari</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.hikari</shadedPattern>
                                 </relocation>
                                 <!--
                                   Caffeine relocation. Same rationale as Hikari above: another
@@ -710,44 +718,44 @@
                                 -->
                                 <relocation>
                                     <pattern>com.github.benmanes.caffeine</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.caffeine</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.caffeine</shadedPattern>
                                 </relocation>
                                 <!-- MCProtocolLib and its private runtime implementation packages. -->
                                 <relocation>
                                     <pattern>org.geysermc.mcprotocollib</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.mcprotocollib</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.mcprotocollib</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>org.cloudburstmc.nbt</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.cloudburst.nbt</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.cloudburst.nbt</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>org.cloudburstmc.math</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.cloudburst.math</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.cloudburst.math</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>it.unimi.dsi.fastutil</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.fastutil</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.fastutil</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>com.nukkitx.fastutil</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.nukkitx.fastutil</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.nukkitx.fastutil</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>net.raphimc.minecraftauth</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.minecraftauth</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.minecraftauth</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>net.lenni0451.commons</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.lenni0451</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.lenni0451</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>net.kyori.adventure.text.serializer.json.legacyimpl</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.kyori.json.legacyimpl</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.kyori.json.legacyimpl</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>net.kyori.adventure.nbt</pattern>
-                                    <shadedPattern>net.rafalohaki.veloauth.libs.kyori.nbt</shadedPattern>
+                                    <shadedPattern>io.github.fulingsnow.youshuiauth.libs.kyori.nbt</shadedPattern>
                                 </relocation>
                             </relocations>
                             <transformers>

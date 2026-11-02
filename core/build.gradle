@@ -1,0 +1,252 @@
+plugins {
+    id 'java'
+    id 'maven-publish'
+    id 'jacoco'
+    id 'pmd'
+    id 'com.gradleup.shadow'
+    id 'org.cyclonedx.bom'
+}
+
+// 平台工程（platforms/<p>/origin 生成的版本工程）经 mavenLocal 消费本模块。
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            // shadow 插件会自动把 shadowJar 作为 'all' 分类附件发布，
+            // 平台直接消费该 jar，无需各自声明运行时依赖。
+            from components.java
+            artifactId = 'youshuiauth-core'
+        }
+    }
+}
+
+def buildTokens = [
+        'project.version'        : project.version.toString(),
+        'embedded.build.channel' : 'stable',
+].collectEntries { key, value -> [key, value.toString()] }
+
+def substituteTokens = { String line ->
+    def result = line
+    buildTokens.each { key, value -> result = result.replace('${' + key + '}', value) }
+    result
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs = ["src/main/java"]
+        }
+        resources {
+            srcDirs = ["src/main/resources"]
+        }
+    }
+    test {
+        java {
+            srcDirs = ["src/test/java"]
+        }
+    }
+}
+
+def bundleLicenses = tasks.register('bundleLicenses', Copy) {
+    from("$rootDir") {
+        include 'LICENSE', 'THIRD_PARTY_NOTICES.md'
+        into 'META-INF/youshuiauth'
+    }
+    from("$rootDir") {
+        include 'LICENSE.YouShuiAuth'
+        into 'META-INF/licenses'
+    }
+    into layout.buildDirectory.dir('generated/licenses')
+}
+
+sourceSets.main.resources.srcDir(bundleLicenses.map { it.destinationDir })
+
+processResources {
+    filesMatching(['lang/messages_*.properties']) {
+        filter(substituteTokens)
+    }
+}
+
+dependencies {
+    compileOnly 'org.slf4j:slf4j-api:2.0.20'
+    compileOnly 'net.kyori:adventure-api:4.26.1'
+    compileOnly 'net.kyori:adventure-key:4.26.1'
+    compileOnly 'net.kyori:adventure-text-serializer-gson:4.26.1'
+    compileOnly 'net.kyori:adventure-text-serializer-legacy:4.26.1'
+    compileOnly 'net.kyori:adventure-text-serializer-plain:4.26.1'
+    compileOnly 'com.google.code.gson:gson:2.13.2'
+    compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
+    compileOnly 'org.spongepowered:configurate-core:4.2.0'
+    compileOnly 'org.spongepowered:configurate-yaml:4.2.0'
+
+    implementation 'com.j256.ormlite:ormlite-jdbc:6.1'
+    implementation 'com.mysql:mysql-connector-j:9.5.0'
+    implementation 'org.postgresql:postgresql:42.7.13'
+    implementation 'com.h2database:h2:2.4.240'
+    implementation 'org.xerial:sqlite-jdbc:3.51.1.0'
+    implementation 'at.favre.lib:bcrypt:0.10.2'
+    implementation 'com.zaxxer:HikariCP:6.3.0'
+    implementation 'com.github.ben-manes.caffeine:caffeine:3.2.4'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.12.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.12.0'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.12.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.0'
+    testImplementation 'org.mockito:mockito-core:5.12.0'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.12.0'
+    testImplementation 'org.slf4j:slf4j-simple:2.0.18'
+
+    // compileOnly 的配置/序列化依赖在测试运行期需要真实实现
+    testImplementation 'org.spongepowered:configurate-core:4.2.0'
+    testImplementation 'org.spongepowered:configurate-yaml:4.2.0'
+    testImplementation 'com.google.code.gson:gson:2.13.2'
+    testImplementation 'com.google.code.findbugs:jsr305:3.0.2'
+    testImplementation 'net.kyori:adventure-api:4.26.1'
+    testImplementation 'net.kyori:adventure-text-serializer-plain:4.26.1'
+    testImplementation 'net.kyori:adventure-text-serializer-legacy:4.26.1'
+    testImplementation 'net.kyori:adventure-text-serializer-gson:4.26.1'
+    testImplementation 'net.kyori:adventure-text-minimessage:4.26.1'
+}
+
+configurations.configureEach {
+    resolutionStrategy {
+        force 'net.kyori:adventure-api:4.26.1',
+                'net.kyori:adventure-key:4.26.1',
+                'net.kyori:adventure-text-serializer-gson:4.26.1',
+                'net.kyori:adventure-text-serializer-legacy:4.26.1',
+                'net.kyori:adventure-text-serializer-plain:4.26.1'
+    }
+}
+
+tasks.named('test', Test) {
+    workingDir = rootDir
+    if (!providers.gradleProperty('withDatabaseIt').isPresent()) {
+        exclude '**/*IT.class'
+    }
+    systemProperties(System.getProperties().findAll {
+        it.key.toString().startsWith('youshuiauth.')
+    })
+    jvmArgs(
+            '--add-opens=java.base/java.lang=ALL-UNNAMED',
+            '--add-opens=java.base/java.util=ALL-UNNAMED',
+            '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED',
+            '-Djdk.attach.allowAttachSelf=true',
+            '-XX:+EnableDynamicAgentLoading',
+            '-Dnet.bytebuddy.experimental=true',
+            '-Xshare:off',
+            '-Dorg.slf4j.simpleLogger.logFile=System.out',
+            '-Dorg.slf4j.simpleLogger.defaultLogLevel=error',
+    )
+    finalizedBy tasks.named('jacocoTestReport')
+}
+
+tasks.named('jacocoTestReport', JacocoReport) {
+    dependsOn tasks.named('test')
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+pmd {
+    toolVersion = '7.26.0'
+    ruleSets = []
+    ruleSetFiles = files("$rootDir/pmd-ruleset.xml")
+    ignoreFailures = false
+    consoleOutput = true
+}
+
+tasks.named('pmdTest') { enabled = false }
+
+configurations {
+    cpd
+}
+
+dependencies {
+    cpd 'net.sourceforge.pmd:pmd-cli:7.26.0'
+    cpd 'net.sourceforge.pmd:pmd-java:7.26.0'
+}
+
+def cpdReport = layout.buildDirectory.file('cpd.xml')
+
+tasks.register('cpdCheck', JavaExec) {
+    group = 'verification'
+    description = 'Fails on copy-paste duplication above 50 tokens.'
+    classpath = configurations.cpd
+    mainClass = 'net.sourceforge.pmd.cli.PmdCli'
+    args(
+            'cpd',
+            // 60 tokens：密码类命令共享骨架（开关 + 参数 + 可见性）天然相似，
+            // 该阈值仍能拦住成段复制粘贴。
+            '--minimum-tokens', '60',
+            '--language', 'java',
+            '--dir', "$projectDir/src/main/java",
+            '--format', 'xml',
+            '--report-file', cpdReport.get().asFile.absolutePath,
+            '--fail-on-violation'
+    )
+    doFirst {
+        cpdReport.get().asFile.parentFile.mkdirs()
+    }
+}
+
+tasks.register('checkVelocityLeak') {
+    doLast {
+        def leaks = []
+        fileTree('src/main/java').matching { include '**/*.java' }.files.each { f ->
+            f.readLines().findAll { it.contains('import com.velocitypowered') }.each {
+                leaks << (f.name + ': ' + it.trim())
+            }
+        }
+        if (leaks) {
+            leaks.each { println('VELOCITY LEAK: ' + it) }
+            throw new GradleException(
+                    'core must not depend on Velocity API; found ' + leaks.size() + ' leak(s)')
+        }
+        println('velocity leak check: clean')
+    }
+}
+
+tasks.named('check') { dependsOn 'cpdCheck', 'checkVelocityLeak' }
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+shadowJar {
+    archiveFileName = "YouShuiAuth-${project.version}.jar"
+    destinationDirectory = layout.buildDirectory.dir('libs')
+
+    exclude 'org/slf4j/**'
+    exclude 'net/kyori/adventure/**'
+    exclude 'net/kyori/examination/**'
+    exclude 'net/kyori/option/**'
+    exclude 'com/google/gson/**'
+    exclude 'org/spongepowered/configurate/**'
+    exclude 'org/yaml/snakeyaml/**'
+    exclude 'org/checkerframework/**'
+    exclude 'com/google/errorprone/**'
+    exclude 'org/jspecify/**'
+
+    exclude 'META-INF/MANIFEST.MF'
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+    exclude 'META-INF/LICENSE'
+    exclude 'META-INF/NOTICE'
+    exclude 'META-INF/LICENSE.txt'
+    exclude 'META-INF/NOTICE.txt'
+    exclude 'module-info.class'
+    exclude 'META-INF/versions/*/module-info.class'
+    exclude '**/*Test.java'
+
+    relocate 'com.j256.ormlite', 'io.github.fulingsnow.youshuiauth.libs.ormlite'
+    relocate 'at.favre.lib.crypto', 'io.github.fulingsnow.youshuiauth.libs.bcrypt'
+    relocate 'at.favre.lib.bytes', 'io.github.fulingsnow.youshuiauth.libs.bytes'
+    relocate 'com.zaxxer.hikari', 'io.github.fulingsnow.youshuiauth.libs.hikari'
+    relocate 'com.github.benmanes.caffeine', 'io.github.fulingsnow.youshuiauth.libs.caffeine'
+
+    mergeServiceFiles()
+}
+
+tasks.named('build') { dependsOn tasks.named('shadowJar') }

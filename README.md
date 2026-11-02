@@ -2,16 +2,17 @@
 
 <div align="center">
 
-基于 [Velocity](https://docs.papermc.io/velocity/) 的 Minecraft 代理端认证插件
+Minecraft 多平台认证套件：Velocity 代理端 + Paper 服务端（同一套认证内核）
 
-支持 QQ 绑定注册、QQ 快捷登录、设备免密自动登录、两步验证与多数据库存储
+支持 QQ 绑定注册、QQ 快捷登录、设备免密自动登录、两步验证与多数据库存储；
+非代理平台通过「冻结隔离区」完成同等登录流程（详见 [docs/platforms.md](docs/platforms.md)）
 
 </div>
 
 <div align="center">
 
 ![Velocity](https://img.shields.io/badge/Velocity-4.x-blue)
-![Version](https://img.shields.io/badge/version-v1.1.1-blue)
+![Version](https://img.shields.io/badge/version-v1.1.2-blue)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--only-red)
 [![Build and release](https://github.com/FuLingSnow/youshuiauth/actions/workflows/build-and-release.yml/badge.svg)](https://github.com/FuLingSnow/youshuiauth/actions/workflows/build-and-release.yml)
 
@@ -20,6 +21,7 @@
 ## 目录
 
 - [简介](#简介)
+- [路线图](#路线图)
 - [功能特性](#功能特性)
 - [环境要求](#环境要求)
 - [安装](#安装)
@@ -32,6 +34,16 @@
 ## 简介
 
 部署在 Velocity 代理端的统一认证方案：离线玩家通过 QQ 绑定即可完成注册与登录，已绑定玩家使用 6 位登录码或设备免密快速进入服务器；内置防爆破、限频、TOTP 两步验证与审计日志，支持 PostgreSQL / MySQL / SQLite / H2 多种数据库。
+
+## 路线图
+
+| 版本 | 内容 |
+|---|---|
+| 1.1.2 | **平台拆分 + Paper 服务端适配**（冻结隔离区；`core` 编译期零平台依赖；Velocity 独立为 `platforms/velocity`） |
+| 1.2.0 | Fabric 服务端适配 |
+| 1.3.0 | NeoForge 服务端适配 |
+| 1.4.0 | Forge 服务端适配 |
+| 2.0.0 | 包名、Maven 坐标与数据库表名统一更名为 YouShuiAuth（含自动迁移） |
 
 ## 功能特性
 
@@ -63,7 +75,7 @@ https://github.com/FuLingSnow/youshuiauth/releases/latest/download/YouShuiAuth-l
 
 ### 方式一：手动安装
 
-将 `YouShuiAuth-1.1.1.jar` 放入 Velocity 的 `plugins/` 目录，重启代理即可。首次启动自动生成 `config.yml` 与多语言文件。
+将 `YouShuiAuth-1.1.2.jar` 放入 Velocity 的 `plugins/` 目录，重启代理即可。首次启动自动生成 `config.yml` 与多语言文件。
 
 下载后可校验发布包完整性：
 
@@ -180,8 +192,8 @@ database:
 ```
 YouShuiAuth/
 ├── pom.xml                          # Maven 构建配置（Java 21）
-├── src/main/java/net/rafalohaki/veloauth/
-│   ├── VeloAuth.java                # 插件入口与生命周期
+├── src/main/java/io/github/fulingsnow/youshuiauth/
+│   ├── YouShuiAuth.java                # 插件入口与生命周期
 │   ├── command/                     # 登录 / 注册 / 管理命令与 QQ 服务
 │   ├── listener/                    # 连接、认证事件与后端守卫
 │   ├── connection/                  # 转服协调与登录大厅超时调度
@@ -205,8 +217,8 @@ YouShuiAuth/
 - 设备指纹由客户端上报字段组合而成，属于**便利因子**而非强凭据：2FA 账号永不自动登录；改密 / 解绑会吊销全部免密记录。
 - 登录码仅存在代理内存中，代理重启后失效；同一账号同一时刻只有一个有效登录码。
 - 绑定码 / 登录码在数据库中只保存 SHA-256 哈希，明文不出现在任何存储中。
-- `database` 表名保持 `VELOAUTH_` 前缀以兼容既有数据，升级时请勿手动改名。
-- 首次从旧版 `veloauth` 数据目录升级时，插件会自动将 `plugins/veloauth/` 内容迁移到 `plugins/youshuiauth/`。
+- 2.0.0 起表名统一 `YOUSHUI_` 前缀；旧表在启动时自动改名（幂等，无需手工操作）。
+- 从旧版 `plugins/veloauth/` 升级时，插件自动把内容迁移到 `plugins/youshuiauth/`（仅当新目录为空）。
 
 ## CI 与依赖安全
 
@@ -225,6 +237,6 @@ YouShuiAuth/
 
 本项目基于 [GNU Affero General Public License v3.0 (AGPL-3.0-only)](./LICENSE) 协议开源。
 
-项目包含来自 [VeloAuth](https://github.com/rafalohaki/VeloAuth) 的代码（MIT，见 [LICENSE.VeloAuth](./LICENSE.VeloAuth)），依照其许可要求保留原始版权声明。
+项目包含来自 [YouShuiAuth](https://github.com/rafalohaki/YouShuiAuth) 的代码（MIT，见 [LICENSE.YouShuiAuth](./LICENSE.YouShuiAuth)），依照其许可要求保留原始版权声明。
 
 作者：[FuLingSnow](https://github.com/FuLingSnow) · 欢迎提交 [Issue](https://github.com/FuLingSnow/youshuiauth/issues) 与 PR

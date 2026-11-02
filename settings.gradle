@@ -1,0 +1,4 @@
+rootProject.name = 'YouShuiAuth'
+
+include 'core'
+include 'tool:version-generator'

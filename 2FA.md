@@ -1,11 +1,11 @@
 # Two-Factor Authentication (2FA / TOTP)
 
-VeloAuth ships with RFC 6238 Time-based One-Time Password (TOTP) support. This is the same
+YouShuiAuth ships with RFC 6238 Time-based One-Time Password (TOTP) support. This is the same
 algorithm Google Authenticator, Authy, Aegis, FreeOTP and 1Password all speak — so a player can
 enroll with whichever authenticator app they already use, no extra setup required.
 
 This document is the operator + player handbook. Source code lives under
-[`net/rafalohaki/veloauth/auth/totp/`](src/main/java/net/rafalohaki/veloauth/auth/totp/).
+[`io/github/fulingsnow/youshuiauth/auth/totp/`](src/main/java/io/github/fulingsnow/youshuiauth/auth/totp/).
 
 ---
 
@@ -14,7 +14,7 @@ This document is the operator + player handbook. Source code lives under
 - **Opt-in per player.** Nobody is forced into 2FA. Players who want it run `/2fa setup`.
 - **Operator master switch.** `two-factor.enabled` in `config.yml`. Set to `false` to globally
   disable enrollment **and** enforcement.
-- **Drop-in compatible with LimboAuth.** VeloAuth reads the same `TOTPTOKEN` column with the
+- **Drop-in compatible with LimboAuth.** YouShuiAuth reads the same `TOTPTOKEN` column with the
   same RFC 6238 parameters. Migrated players keep their existing authenticator entries.
 - **Codes rotate every 30 seconds.** The shared 160-bit secret stays in the database; the
   6-digit codes are derived from `HMAC-SHA1(secret, current_30s_window)`.
@@ -36,7 +36,7 @@ secret and the same 30-second window. The player types it; the server checks. Do
 network call happens during login — the only secret exchange is at enrollment time, when the
 player scans the QR code or types the Base32 secret into their app.
 
-VeloAuth accepts codes from the current window **and** the two adjacent windows (±30 s) so phones
+YouShuiAuth accepts codes from the current window **and** the two adjacent windows (±30 s) so phones
 with a slight clock drift still authenticate. Brute-force attempts go through the same per-IP +
 per-username tracker as password attempts, so 5 wrong codes get the IP / username temporarily
 blocked just like 5 wrong passwords.
@@ -51,7 +51,7 @@ blocked just like 5 wrong passwords.
 /2fa setup
 ```
 
-Run this **after** logging in (the normal `/login <password>` flow). VeloAuth will print:
+Run this **after** logging in (the normal `/login <password>` flow). YouShuiAuth will print:
 
 1. The Base32 secret (in case your app prefers manual entry).
 2. The `otpauth://` URI.
@@ -70,11 +70,11 @@ field. Both paths produce the same result. Then confirm:
 /2fa verify 123456
 ```
 
-…using the 6-digit code your app currently shows. On success VeloAuth writes the secret to the
+…using the 6-digit code your app currently shows. On success YouShuiAuth writes the secret to the
 database and 2FA is active from your next login.
 
 > The secret is shown in chat. After scanning, clear your chat history if you share the screen
-> with anyone. **You don't need to copy the secret anywhere else** — VeloAuth stores it server-side.
+> with anyone. **You don't need to copy the secret anywhere else** — YouShuiAuth stores it server-side.
 
 ### Logging in with 2FA
 
@@ -126,7 +126,7 @@ It's on by default. The relevant block in `config.yml`:
 ```yaml
 two-factor:
   enabled: true
-  issuer: "VeloAuth"
+  issuer: "YouShuiAuth"
   qr-link-enabled: false
   pending-timeout-seconds: 300
 ```
@@ -137,7 +137,7 @@ two-factor:
 - `issuer` — what shows up in the player's authenticator app next to each saved code
   (typically your server name). Must not contain `:` (reserved by the otpauth URI format).
 - `qr-link-enabled` — when `true` (explicit opt-in), fresh `/2fa setup` output appends a clickable
-  `[ Click here to scan ... ]` line that opens the VeloAuth-maintained QR endpoint
+  `[ Click here to scan ... ]` line that opens the YouShuiAuth-maintained QR endpoint
   ([`qr.autarch.workers.dev`](https://qr.autarch.workers.dev)) in the player's browser.
   The URL shape is `qr.autarch.workers.dev/<base32-secret>` — the worker hosts a fixed
   otpauth template (issuer / account / algorithm / digits / period) and the secret
@@ -166,7 +166,7 @@ treat it the same way you'd treat a manual password reset.
 
 ### Audit log
 
-Every 2FA event is recorded in `VELOAUTH_AUDIT_LOG` (when `audit-log.enabled=true`). Event types:
+Every 2FA event is recorded in `YOUSHUI_AUDIT_LOG` (when `audit-log.enabled=true`). Event types:
 
 - `TWO_FACTOR_ENABLED` — fires on a successful `/2fa setup` + verify.
 - `TWO_FACTOR_DISABLED` — fires on a successful `/2fa disable` (player) or
@@ -184,7 +184,7 @@ brute-force tracker as password misses.
 ### Migrating from LimboAuth
 
 If you're switching from LimboAuth and players already have 2FA enabled there, you do nothing.
-VeloAuth uses the same `TOTPTOKEN` column with the same algorithm parameters (SHA-1, 30 s, 6
+YouShuiAuth uses the same `TOTPTOKEN` column with the same algorithm parameters (SHA-1, 30 s, 6
 digits). Existing tokens validate against existing authenticator app entries on first login.
 
 ### Disabling 2FA globally
@@ -229,7 +229,7 @@ What 2FA does **not** protect:
 
 - `TOTPTOKEN` column is `VARCHAR(32)`. A 160-bit RFC 6238 secret encodes to exactly 32 Base32
   characters (no padding). Don't change the column width.
-- The Base32 alphabet is uppercase + `2-7`. VeloAuth's decoder accepts lowercase and tolerates
+- The Base32 alphabet is uppercase + `2-7`. YouShuiAuth's decoder accepts lowercase and tolerates
   whitespace + `=` padding, so a copy-paste from an authenticator app's "manual entry" screen
   works regardless of how the app formats the secret.
 - Pending 2FA state lives in memory (Caffeine cache, bounded to 10 000 concurrent entries,
@@ -248,7 +248,7 @@ What 2FA does **not** protect:
 
 ## Spec compliance
 
-VeloAuth's TOTP implementation conforms to:
+YouShuiAuth's TOTP implementation conforms to:
 
 - [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238) — TOTP algorithm.
 - [RFC 4226](https://www.rfc-editor.org/rfc/rfc4226) — HOTP (the HMAC-truncation routine TOTP
@@ -258,6 +258,6 @@ VeloAuth's TOTP implementation conforms to:
   — the `otpauth://` URI grammar consumed by every modern authenticator app.
 
 If a code generated by an external compliant authenticator app fails to verify, file an issue
-with sanitized details: VeloAuth/Velocity/Java versions, authenticator application name,
+with sanitized details: YouShuiAuth/Velocity/Java versions, authenticator application name,
 approximate clock drift, database type and relevant redacted logs. **Never include a TOTP secret,
 a live or expired code, a complete `otpauth://` URI, database dump or player credentials.**

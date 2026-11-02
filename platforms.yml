@@ -1,0 +1,16 @@
+platforms:
+  velocity:
+    versions: [3.4.0]
+    java_version: 21
+  paper:
+    versions: [1.21.4]
+    java_version: 21
+  fabric:
+    versions: [1.21.4]
+    java_version: 21
+  neoforge:
+    versions: [1.21.4]
+    java_version: 21
+  forge:
+    versions: [1.21.1]
+    java_version: 21

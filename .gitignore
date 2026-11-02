@@ -121,7 +121,9 @@ refactor/
 .trae/
 codacy.yaml
 .kiro/
-docs/
+docs/*
+!docs/platforms.md
+!docs/audit-log.md
 audyt/
 .windsurf
 analiza.md
@@ -155,3 +157,15 @@ data/
 
 # Python caches
 __pycache__/
+
+# Gradle
+.gradle/
+build/
+*/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Generated per-version platform projects (origin templates stay tracked)
+platforms/*/*-*/
+!platforms/*/*-*/gradlew
+!platforms/*/*-*/gradlew.bat
+!platforms/*/*-*/support_version.txt

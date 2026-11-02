@@ -1,0 +1,41 @@
+plugins {
+    id 'com.gradleup.shadow' version '8.3.5' apply false
+    id 'org.cyclonedx.bom' version '1.10.0' apply false
+}
+
+allprojects {
+    group = providers.gradleProperty('mod_group').get()
+    version = providers.gradleProperty('mod_version').get()
+
+    repositories {
+        mavenLocal()
+        mavenCentral()
+        maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+        maven { url = 'https://repo.opencollab.dev/main/' }
+        maven { url = 'https://repo.opencollab.dev/maven-snapshots/' }
+        maven { url = 'https://repo.viaversion.com/' }
+    }
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release = 21
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        testLogging {
+            events 'passed', 'skipped', 'failed'
+            exceptionFormat = 'full'
+        }
+    }
+}
