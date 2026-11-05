@@ -144,6 +144,16 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
+      # 发布正文需要读取 CHANGELOG.md 与提取脚本；download-artifact 不会检出仓库，
+      # 因此必须显式 checkout，并按需只取这两个路径。
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          sparse-checkout: |
+            scripts
+            CHANGELOG.md
+
       - name: Download Paper jar
         uses: actions/download-artifact@v4
         with:
