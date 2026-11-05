@@ -92,6 +92,7 @@ class DatabaseMigrationService {
     private MigrationResult doCreateTablesAndMigrate(ConnectionSource connectionSource,
                                                      String tablesCreatedMsg)
             throws SQLException {
+        preflightLegacyMigration(connectionSource);
         renameLegacyTables(connectionSource);
         createTablesQuietly(connectionSource);
 
@@ -359,6 +360,266 @@ class DatabaseMigrationService {
     };
 
     /**
+     * 迁移前的只读预检：只做检查，不执行任何 DDL。
+     *
+     * <p>发现问题时一次性汇总并抛出，使初始化走与 DDL 失败完全相同的优雅关闭链路，
+     * 同时保证库不会停在半迁移状态。检查分三类：待迁移旧表的 owner、已存在目标表的
+     * 读写权限、schema 的 CREATE 权限。</p>
+     */
+    private void preflightLegacyMigration(ConnectionSource connectionSource) throws SQLException {
+        DatabaseType type = DatabaseType.fromName(config.getStorageType());
+        if (type != DatabaseType.POSTGRESQL && type != DatabaseType.MYSQL) {
+            return;
+        }
+
+        DatabaseConnection pooledConnection = connectionSource.getReadWriteConnection(null);
+        try {
+            java.sql.Connection connection = pooledConnection.getUnderlyingConnection();
+            java.util.Map<String, String> existingTables = collectExistingTables(connection);
+            java.util.List<String[]> pending = pendingLegacyRenames(existingTables);
+
+            String quote = identifierQuote(type);
+            String schema = type == DatabaseType.POSTGRESQL
+                    ? currentSchemaName(connection)
+                    : safeCatalog(connection);
+            String currentUser = currentDatabaseUser(connection);
+
+            java.util.List<String> problems = new java.util.ArrayList<>();
+            java.util.List<String> fixes = new java.util.ArrayList<>();
+
+            // 没有待迁移旧表时跳过 owner 检查，但已有表的读写权限与 schema 权限仍需检查
+            if (!pending.isEmpty() && type == DatabaseType.POSTGRESQL && !isPostgresSuperuser(connection)) {
+                collectOwnershipProblems(connection, pending, quote, schema, currentUser, problems, fixes);
+            }
+            collectTablePrivilegeProblems(connection, type, existingTables, quote, schema,
+                    currentUser, problems, fixes);
+            collectSchemaPrivilegeProblem(connection, type, schema, quote, currentUser, problems, fixes);
+
+            if (problems.isEmpty()) {
+                return;
+            }
+            throw new SQLException(buildPreflightReport(problems, fixes, currentUser));
+        } finally {
+            connectionSource.releaseConnection(pooledConnection);
+        }
+    }
+
+    /** 收集「旧表存在且新表不存在」的待迁移项。 */
+    private static java.util.List<String[]> pendingLegacyRenames(
+            java.util.Map<String, String> existingTables) {
+        java.util.List<String[]> pending = new java.util.ArrayList<>();
+        for (String[] rename : LEGACY_TABLE_RENAMES) {
+            String existingOld = existingTables.get(rename[0].toUpperCase(java.util.Locale.ROOT));
+            if (existingOld != null && !existingTables.containsKey(rename[1])) {
+                pending.add(new String[]{existingOld, rename[1]});
+            }
+        }
+        return pending;
+    }
+
+    /** 待迁移旧表的 owner 必须等于当前账号，否则改名会被拒绝。 */
+    private static void collectOwnershipProblems(java.sql.Connection connection,
+                                                 java.util.List<String[]> pending, String quote,
+                                                 String schema, String currentUser,
+                                                 java.util.List<String> problems,
+                                                 java.util.List<String> fixes) {
+        for (String[] item : pending) {
+            String owner = postgresTableOwner(connection, item[0]);
+            if (owner == null || owner.equalsIgnoreCase(currentUser)) {
+                continue;
+            }
+            problems.add(String.format("  · 表 %s 的 owner 是 %s，不是当前账号 %s",
+                    item[0], owner, currentUser));
+            fixes.add(String.format("ALTER TABLE %s.%s OWNER TO %s;",
+                    quoteIdentifierStatic(quote, schema), quoteIdentifierStatic(quote, item[0]),
+                    quoteIdentifierStatic(quote, currentUser)));
+        }
+    }
+
+    /** 已存在的 YOUSHUI_* 表必须对当前账号可读写，否则迁移后立刻报 permission denied。 */
+    private static void collectTablePrivilegeProblems(java.sql.Connection connection, DatabaseType type,
+                                                      java.util.Map<String, String> existingTables,
+                                                      String quote, String schema, String currentUser,
+                                                      java.util.List<String> problems,
+                                                      java.util.List<String> fixes) {
+        java.util.LinkedHashSet<String> knownTables = new java.util.LinkedHashSet<>();
+        for (String[] rename : LEGACY_TABLE_RENAMES) {
+            knownTables.add(rename[1]);
+        }
+        for (String targetTable : knownTables) {
+            String actual = existingTables.get(targetTable.toUpperCase(java.util.Locale.ROOT));
+            if (actual == null || hasTableWritePrivilege(connection, type, schema, actual, quote)) {
+                continue;
+            }
+            problems.add(String.format("  · 表 %s 对当前账号 %s 不可读写（owner 可能是其他账号且未授权）",
+                    actual, currentUser));
+            fixes.add(String.format("GRANT ALL ON TABLE %s.%s TO %s;",
+                    quoteIdentifierStatic(quote, schema), quoteIdentifierStatic(quote, actual),
+                    quoteIdentifierStatic(quote, currentUser)));
+        }
+    }
+
+    /** schema 缺少 CREATE 权限时，迁移完成后的建表会失败。 */
+    private static void collectSchemaPrivilegeProblem(java.sql.Connection connection, DatabaseType type,
+                                                      String schema, String quote, String currentUser,
+                                                      java.util.List<String> problems,
+                                                      java.util.List<String> fixes) {
+        if (hasSchemaCreatePrivilege(connection, type, schema)) {
+            return;
+        }
+        problems.add(String.format("  · schema %s 缺少 CREATE 权限（迁移完成后建表需要）", schema));
+        fixes.add(type == DatabaseType.POSTGRESQL
+                ? String.format("GRANT CREATE ON SCHEMA %s TO %s;",
+                        quoteIdentifierStatic(quote, schema), quoteIdentifierStatic(quote, currentUser))
+                : String.format("GRANT CREATE ON `%s`.* TO '%s';", schema, currentUser));
+    }
+
+    /** 把问题与修复语句拼成一条可直接阅读的报错。 */
+    private static String buildPreflightReport(java.util.List<String> problems,
+                                               java.util.List<String> fixes, String currentUser) {
+        StringBuilder report = new StringBuilder(512);
+        report.append("迁移前置检查未通过，已在执行任何改名之前中止，数据库保持原样：")
+                .append(System.lineSeparator());
+        problems.forEach(line -> report.append(line).append(System.lineSeparator()));
+        report.append("请用具备权限的账号执行以下语句（当前连接账号：")
+                .append(currentUser).append("）：").append(System.lineSeparator());
+        fixes.forEach(line -> report.append("  ").append(line).append(System.lineSeparator()));
+        report.append("执行完成后重启服务端，迁移会自动继续。");
+        return report.toString();
+    }
+
+    /** quoteIdentifier 的静态版本，供静态检查方法复用。 */
+    private static String quoteIdentifierStatic(String quote, String identifier) {
+        return quote + identifier + quote;
+    }
+
+    /** PostgreSQL 超级用户可改任意表，owner 检查对其无意义。 */
+    private static boolean isPostgresSuperuser(java.sql.Connection connection) {
+        try (java.sql.Statement statement = connection.createStatement();
+             java.sql.ResultSet rows =
+                     statement.executeQuery("SELECT current_setting('is_superuser')")) {
+            return rows.next() && "on".equalsIgnoreCase(rows.getString(1));
+        } catch (SQLException ignored) {
+            return false;
+        }
+    }
+
+    /** 读取当前库里的全部表名（大写键 → 原始表名），供迁移与预检共用。 */
+    private java.util.Map<String, String> collectExistingTables(java.sql.Connection connection)
+            throws SQLException {
+        java.util.Map<String, String> existingTables = new java.util.HashMap<>();
+        try (java.sql.ResultSet tables = connection.getMetaData()
+                .getTables(null, null, null, null)) {
+            while (tables.next()) {
+                String name = tables.getString("TABLE_NAME");
+                if (name != null) {
+                    existingTables.put(name.toUpperCase(java.util.Locale.ROOT), name);
+                }
+            }
+        }
+        return existingTables;
+    }
+
+    private static String safeCatalog(java.sql.Connection connection) {
+        try {
+            String catalog = connection.getCatalog();
+            return catalog == null ? "" : catalog;
+        } catch (SQLException ignored) {
+            return "";
+        }
+    }
+
+    private static String currentSchemaName(java.sql.Connection connection) {
+        try (java.sql.Statement statement = connection.createStatement();
+             java.sql.ResultSet rows = statement.executeQuery("SELECT current_schema()")) {
+            return rows.next() && rows.getString(1) != null ? rows.getString(1) : "public";
+        } catch (SQLException ignored) {
+            return "public";
+        }
+    }
+
+    private static String currentDatabaseUser(java.sql.Connection connection) {
+        try (java.sql.Statement statement = connection.createStatement();
+             java.sql.ResultSet rows = statement.executeQuery("SELECT current_user")) {
+            return rows.next() && rows.getString(1) != null ? rows.getString(1) : "";
+        } catch (SQLException ignored) {
+            return "";
+        }
+    }
+
+    /** PostgreSQL：查表的 owner 角色名；查不到时返回 null（视为无法判定，不阻断）。 */
+    private static String postgresTableOwner(java.sql.Connection connection, String tableName) {
+        String sql = "SELECT pg_get_userbyid(c.relowner) FROM pg_class c "
+                + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                + "WHERE n.nspname = current_schema() AND c.relname = ?";
+        try (java.sql.PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, tableName);
+            try (java.sql.ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? rows.getString(1) : null;
+            }
+        } catch (SQLException ignored) {
+            return null;
+        }
+    }
+
+    /** 检查当前账号对某张表是否具备读写权限；查询失败时不阻断，交给实际执行暴露。 */
+    private static boolean hasTableWritePrivilege(java.sql.Connection connection, DatabaseType type,
+                                                  String schema, String table, String quote) {
+        try {
+            if (type == DatabaseType.POSTGRESQL) {
+                // PostgreSQL 会把未加引号的标识符折叠成小写，必须带引号传入完整限定名
+                String qualified = quoteIdentifierStatic(quote, schema)
+                        + "." + quoteIdentifierStatic(quote, table);
+                try (java.sql.PreparedStatement statement = connection.prepareStatement(
+                        "SELECT has_table_privilege(current_user, ?, 'SELECT,INSERT,UPDATE,DELETE')")) {
+                    statement.setString(1, qualified);
+                    try (java.sql.ResultSet rows = statement.executeQuery()) {
+                        return !rows.next() || rows.getBoolean(1);
+                    }
+                }
+            }
+            try (java.sql.PreparedStatement statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM information_schema.TABLE_PRIVILEGES "
+                            + "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
+                            + "AND PRIVILEGE_TYPE IN ('SELECT','INSERT','UPDATE','DELETE')")) {
+                statement.setString(1, schema);
+                statement.setString(2, table);
+                try (java.sql.ResultSet rows = statement.executeQuery()) {
+                    return !rows.next() || rows.getInt(1) > 0;
+                }
+            }
+        } catch (SQLException ignored) {
+            return true;
+        }
+    }
+
+    /** 检查当前账号在目标 schema 上是否具备 CREATE 权限；查询失败时不阻断，交给实际执行暴露。 */
+    private static boolean hasSchemaCreatePrivilege(java.sql.Connection connection, DatabaseType type,
+                                                    String schema) {
+        try {
+            if (type == DatabaseType.POSTGRESQL) {
+                try (java.sql.PreparedStatement statement = connection.prepareStatement(
+                        "SELECT has_schema_privilege(current_user, ?, 'CREATE')")) {
+                    statement.setString(1, schema);
+                    try (java.sql.ResultSet rows = statement.executeQuery()) {
+                        return !rows.next() || rows.getBoolean(1);
+                    }
+                }
+            }
+            try (java.sql.PreparedStatement statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES "
+                            + "WHERE TABLE_SCHEMA = ? AND PRIVILEGE_TYPE IN ('CREATE','ALL PRIVILEGES')")) {
+                statement.setString(1, schema);
+                try (java.sql.ResultSet rows = statement.executeQuery()) {
+                    return !rows.next() || rows.getInt(1) > 0;
+                }
+            }
+        } catch (SQLException ignored) {
+            return true;
+        }
+    }
+
+    /**
      * 1.x → 2.0.0 表名迁移：旧表存在且新表不存在时原地改名，保留全部数据。
      * 必须在建表之前执行——先建新表会导致改名被跳过（数据留在旧表里）。
      */
@@ -368,16 +629,7 @@ class DatabaseMigrationService {
         DatabaseConnection pooledConnection = connectionSource.getReadWriteConnection(null);
         try {
             java.sql.Connection connection = pooledConnection.getUnderlyingConnection();
-            java.util.Map<String, String> existingTables = new java.util.HashMap<>();
-            try (java.sql.ResultSet tables = connection.getMetaData()
-                    .getTables(null, null, null, null)) {
-                while (tables.next()) {
-                    String name = tables.getString("TABLE_NAME");
-                    if (name != null) {
-                        existingTables.put(name.toUpperCase(java.util.Locale.ROOT), name);
-                    }
-                }
-            }
+            java.util.Map<String, String> existingTables = collectExistingTables(connection);
             for (String[] rename : LEGACY_TABLE_RENAMES) {
                 String existingOld = existingTables.get(
                         rename[0].toUpperCase(java.util.Locale.ROOT));
