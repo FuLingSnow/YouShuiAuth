@@ -167,3 +167,27 @@ platforms/*/*-*/
 !platforms/*/*-*/gradlew
 !platforms/*/*-*/gradlew.bat
 !platforms/*/*-*/support_version.txt
+
+# ---- 本地运行与手工操作产物（避免误入库）----
+# 数据库文件（在仓库根直接运行插件时会生成）
+*.db
+*.mv.db
+*.sqlite
+*.sqlite3
+
+# 手工备份与合并残留
+*.bak
+*.bak-*
+*.orig
+*.rej
+
+# IDE 与系统文件
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+Thumbs.db
+
+# 运行日志目录
+logs/

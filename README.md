@@ -88,8 +88,19 @@ sha256sum -c YouShuiAuth-latest.jar.sha256
 ```bash
 git clone https://github.com/FuLingSnow/youshuiauth.git
 cd youshuiauth/YouShuiAuth
-./mvnw clean package
+
+# 1. 构建并安装 core（两端共享）
+./gradlew :core:publishToMavenLocal
+
+# 2. 按 platforms.yml 生成平台工程
+./gradlew :tool:version-generator:run --args="$PWD"
+
+# 3. 构建插件
+cd platforms/paper/paper-1.21.4 && ../../gradlew build       # Paper
+cd platforms/velocity/velocity-3.4.0 && ../../gradlew build   # Velocity
 ```
+
+产物位于 `platforms/<平台>/build/libs/YouShuiAuth-<平台>-<版本>.jar`。
 
 ### QQ 功能部署
 
@@ -189,26 +200,31 @@ database:
 
 ## 目录结构
 
-```
+## 目录结构
+
+```text
 YouShuiAuth/
-├── pom.xml                          # Maven 构建配置（Java 21）
-├── src/main/java/io/github/fulingsnow/youshuiauth/
-│   ├── YouShuiAuth.java                # 插件入口与生命周期
-│   ├── command/                     # 登录 / 注册 / 管理命令与 QQ 服务
-│   ├── listener/                    # 连接、认证事件与后端守卫
-│   ├── connection/                  # 转服协调与登录大厅超时调度
-│   ├── cache/                       # 授权缓存与会话管理
-│   ├── auth/                        # TOTP 与冲突模式
-│   ├── database/                    # 多数据库接入与版本迁移
-│   ├── qq/                          # QQ 桥接服务、码管理、设备指纹
-│   ├── config/                      # 配置加载与校验
-│   ├── i18n/                        # 多语言支持
-│   ├── audit/                       # 审计日志
-│   └── util/                        # 工具类（指纹、地址、安全等）
-├── src/main/resources/
-│   ├── default-config.yml           # 默认配置模板
-│   └── lang/                        # 多语言文件
-└── ../astrbot_plugin_fls_youshuiauth/   # 配套 AstrBot 插件
+├── settings.gradle                  # Gradle 多模块声明（core / tool）
+├── build.gradle                     # 根构建脚本（版本与公共配置）
+├── gradle.properties                # mod_version（与 version.txt 保持一致）
+├── platforms.yml                    # 平台与 MC 版本矩阵，驱动版本生成
+├── version.txt                      # 生成平台工程时替换的版本号
+├── core/                            # 平台无关实现，两端共享
+│   └── src/main/java/io/github/fulingsnow/youshuiauth/
+│       ├── command/                 # 登录 / 注册 / 管理命令与 QQ 服务
+│       ├── listener/                # 认证事件
+│       ├── auth/                    # TOTP、冲突模式、免密与设备确认
+│       ├── database/                # 多数据库接入与版本迁移
+│       ├── qq/                      # 桥接服务、码管理、设备指纹
+│       ├── config/                  # 配置加载与校验
+│       ├── i18n/                    # 多语言支持
+│       ├── audit/                   # 审计日志
+│       └── util/                    # 工具类
+├── platforms/
+│   ├── paper/origin/                # Paper 适配层模板（隔离区、命令绑定、消息中继）
+│   └── velocity/origin/             # Velocity 适配层模板（limbo、转服、桥接入口）
+├── tool/version-generator/          # 从 origin 模板生成带版本号的平台工程
+└── scripts/generate_matrix.py       # CI 构建矩阵生成
 ```
 
 ## 注意事项
@@ -222,16 +238,13 @@ YouShuiAuth/
 
 ## CI 与依赖安全
 
-推送 `main` 会触发四个并行/串联的阶段：
-
-| 阶段 | 内容 |
+| 触发 | 内容 |
 |---|---|
-| build | `./mvnw clean verify pmd:cpd-check`：全量单测、PMD、CPD、JaCoCo、打包 |
-| database-it | PostgreSQL 17 与 MySQL 8.4 服务容器上的数据库集成测试 |
-| osv-scan | 对 CycloneDX SBOM 做漏洞扫描，发现漏洞即失败 |
-| release | 前两项通过后更新 `latest` 发布（`YouShuiAuth-latest.jar` 与 `.sha256`） |
+| push `main` / PR | `./gradlew :core:test :core:pmdMain :core:cpdCheck :core:checkVelocityLeak`，并编译两端（不打包） |
+| push tag `v*` | 构建 Paper 与 Velocity 两个插件包并上传 artifact |
+| 手动 `workflow_dispatch` | 填写 tag 后构建；勾选 publish 才创建 GitHub Release |
 
-依赖版本固定写在 `pom.xml`，扫描结果可在 Actions 的 `osv-scan` 任务中查看。
+版本号在两处保持一致：`gradle.properties` 的 `mod_version` 与 `version.txt` 首行。
 
 ## 开源许可
 

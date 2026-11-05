@@ -54,7 +54,7 @@ text remain present in the downloaded JAR.
 
 ## Reproducibility and updates
 
-The pinned MCProtocolLib and ViaVersion coordinates and SHA-256 digests live in `pom.xml`
+The pinned MCProtocolLib and ViaVersion coordinates and SHA-256 digests live in `gradle.properties` and `build.gradle`
 (`mcprotocollib.*` and `viaversion.runtime.*`), and the build refuses to package mismatching bytes.
 At runtime, only embedded mode checks the official snapshot metadata after startup; it never
 hot-swaps code. A staged artifact must pass classloading and complete-path validation on restart or
