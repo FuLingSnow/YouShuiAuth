@@ -16,6 +16,10 @@ on:
         description: '创建 GitHub Release（需填写 tag）'
         type: boolean
         default: false
+      use_changelog:
+        description: '用 CHANGELOG.md 对应版本段落作为 Release 正文（不勾则用 GitHub 自动生成的 notes）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -152,7 +156,22 @@ jobs:
           name: YouShuiAuth-velocity
           path: dist
 
-      - name: Publish to GitHub Release
+      - name: Extract changelog section
+        if: inputs.use_changelog
+        run: python3 scripts/extract_changelog.py "${{ inputs.tag }}" > release-notes.md
+
+      - name: Publish to GitHub Release (changelog)
+        if: inputs.use_changelog
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: dist/*.jar
+          body_path: release-notes.md
+          draft: false
+          fail_on_unmatched_files: true
+
+      - name: Publish to GitHub Release (auto notes)
+        if: ${{ !inputs.use_changelog }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
