@@ -140,9 +140,9 @@ public class YouShuiAuth implements io.github.fulingsnow.youshuiauth.platform.Au
 
     private static void migrateLegacyDataDirectory(Path dataDirectory, Logger logger) {
         try {
-            if (!Files.isDirectory(dataDirectory)) {
-                return;
-            }
+            // 首次安装时 @DataDirectory 指向的目录可能还不存在；
+            // 先创建空目录，否则下面的「是否为空」判断会因为目录不存在而直接放弃迁移。
+            Files.createDirectories(dataDirectory);
             try (var entries = Files.list(dataDirectory)) {
                 if (entries.findAny().isPresent()) {
                     return;

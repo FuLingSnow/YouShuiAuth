@@ -347,7 +347,9 @@ class DatabaseMigrationService {
 
     private static final String[][] LEGACY_TABLE_RENAMES = {
             {"AUTH", "YOUSHUI_AUTH"},
+            {"VELOAUTH_AUTH", "YOUSHUI_AUTH"},
             {"PREMIUM_UUIDS", "YOUSHUI_PREMIUM_UUIDS"},
+            {"VELOAUTH_PREMIUM_UUIDS", "YOUSHUI_PREMIUM_UUIDS"},
             {"VELOAUTH_AUDIT_LOG", "YOUSHUI_AUDIT_LOG"},
             {"VELOAUTH_QQ_BINDING", "YOUSHUI_QQ_BINDING"},
             {"VELOAUTH_QQ_LINK_CODE", "YOUSHUI_QQ_LINK_CODE"},

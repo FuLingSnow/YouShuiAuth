@@ -170,6 +170,9 @@ shadowJar {
     archiveFileName = "YouShuiAuth-velocity-${mod_version}.jar"
     mergeServiceFiles()
     exclude 'org/slf4j/**'
+    // bStats 会检测自身是否被重定位，未重定位时直接抛异常拒绝上报（多个插件都嵌入
+    // org.bstats 时还会互相串台），因此必须改包名。
+    relocate 'org.bstats', 'io.github.fulingsnow.youshuiauth.libs.bstats'
 }
 
 // 只发布含依赖的可运行 jar，避免 thin jar 与产物名冲突。

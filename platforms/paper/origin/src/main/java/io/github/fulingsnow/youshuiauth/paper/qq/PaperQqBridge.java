@@ -147,20 +147,41 @@ public final class PaperQqBridge implements QqAuthBridge {
         }
         DeviceApprovalFlow.StopOutcome outcome =
                 flow.stopAutoLogin(platform, groupId, qqId, stopId, forceOverride);
-        if (outcome.result() != QqResult.OK || outcome.playerId() == null) {
+        if (outcome.result() != QqResult.OK) {
             return outcome.result();
         }
-        runtime.platformAccess().player(outcome.playerId()).ifPresent(player ->
-                runtime.platformAccess().scheduler().scheduleOnce(() -> {
-                    if (!player.isActive()) {
-                        return;
-                    }
-                    player.disconnect(io.github.fulingsnow.youshuiauth.i18n.ClientMessages.of(
-                            player, runtime.settings(), runtime.messages(),
-                            "qq.auto_login.stopped_kick",
-                            net.kyori.adventure.text.format.NamedTextColor.RED));
-                }, java.time.Duration.ZERO));
+        if (outcome.playerId() == null) {
+            return QqResult.OK;
+        }
+        kickWithRetry(outcome.playerId(), 0);
         return QqResult.OK;
+    }
+
+    /**
+     * 撤销免密后的踢出。Paper 的 kick 是异步断开，且玩家可能刚重连（拿到的是新 Player 实例），
+     * 所以每 500ms 重新取一次在线对象重试，最多 3 次；已离线则不再继续。
+     */
+    private void kickWithRetry(java.util.UUID uuid, int attempt) {
+        org.bukkit.entity.Player bukkit = org.bukkit.Bukkit.getPlayer(uuid);
+        if (bukkit == null || !bukkit.isOnline()) {
+            return;
+        }
+        var wrapper = io.github.fulingsnow.youshuiauth.paper.PaperAuthPlayer.of(bukkit);
+        var reason = io.github.fulingsnow.youshuiauth.i18n.ClientMessages.of(
+                wrapper, runtime.settings(), runtime.messages(),
+                "qq.auto_login.stopped_kick",
+                net.kyori.adventure.text.format.NamedTextColor.RED);
+        runtime.platformAccess().scheduler().scheduleOnce(() -> {
+            org.bukkit.entity.Player fresh = org.bukkit.Bukkit.getPlayer(uuid);
+            if (fresh != null && fresh.isOnline()) {
+                fresh.kick(reason);
+            }
+        }, java.time.Duration.ZERO);
+        if (attempt + 1 < 3) {
+            runtime.platformAccess().scheduler().scheduleOnce(
+                    () -> kickWithRetry(uuid, attempt + 1),
+                    java.time.Duration.ofMillis(500));
+        }
     }
 
     private void audit(String details, String username, boolean success) {
@@ -195,12 +216,7 @@ public final class PaperQqBridge implements QqAuthBridge {
         if (flow == null) {
             return List.of();
         }
-        List<QqNotify> out = new java.util.ArrayList<>();
-        QqNotify notify;
-        while ((notify = flow.pollNotification()) != null) {
-            out.add(notify);
-        }
-        return out;
+        return flow.pollNotifications();
     }
 
     private static boolean isBlank(String value) {

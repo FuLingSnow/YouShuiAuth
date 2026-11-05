@@ -81,6 +81,10 @@ import java.util.function.BooleanSupplier;
  * @see PostLoginHandler
  */
 public class AuthListener {
+    /** 该连接的账号类型，未登录提醒用它选文案与按钮。 */
+    private final java.util.Map<java.util.UUID,
+            io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind> accountKinds =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private static final Marker AUTH_MARKER = MarkerFactory.getMarker("AUTH");
     private static final Marker SECURITY_MARKER = MarkerFactory.getMarker("SECURITY");
@@ -1245,17 +1249,34 @@ public class AuthListener {
     }
 
     /** Skips limbo when the last successful login matches device fingerprint and subnet. */
+    private io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind
+            resolveAccountKind(RegisteredPlayer account, Player player, QqAuthService service) {
+        if (account == null) {
+            return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.NONE;
+        }
+        if (io.github.fulingsnow.youshuiauth.qq.QqAuthFlow.QQ_ONLY_HASH
+                .equals(account.getHash())) {
+            return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.QQ_ONLY;
+        }
+        if (service != null && service.isAccountQqBound(player)) {
+            return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.QQ_BOUND;
+        }
+        return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.PASSWORD;
+    }
+
     private void attemptAutoLogin(Player player, ConnectionRef operation) {
         long startedAt = System.nanoTime();
         databaseManager.findPlayerByNickname(player.getUsername())
                 .thenAccept(dbResult -> {
                     RegisteredPlayer account = (dbResult != null && !dbResult.isDatabaseError())
                             ? dbResult.getValue() : null;
+                    QqAuthService service = plugin.getQqAuthService();
+                    accountKinds.put(player.getUniqueId(),
+                            resolveAccountKind(account, player, service));
                     if (account == null) {
                         startLimboFlow(player, operation);
                         return;
                     }
-                    QqAuthService service = plugin.getQqAuthService();
 
                     attemptFingerprintAutoLogin(player, operation, service, startedAt);
                 })
@@ -1305,12 +1326,15 @@ public class AuthListener {
     }
 
     private void startLimboFlow(Player player, ConnectionRef operation) {
-
         connectionLifecycleRegistry.runIfCurrent(operation, () -> {
             plugin.getAuthTimeoutScheduler().schedule(player);
 
-            plugin.getAuthTimeoutScheduler().useReminderPrompt(
-                    player.getUniqueId(), genericPromptKey(), NamedTextColor.YELLOW);
+            var kind = accountKinds.getOrDefault(player.getUniqueId(),
+                    io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.UNKNOWN);
+            var reminder = io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.reminder(
+                    kind, settings.isPasswordRegistrationEnabled(), isQqEnabled());
+            plugin.getAuthTimeoutScheduler().useReminderPrompt(player.getUniqueId(),
+                    reminder.messageKey(), NamedTextColor.YELLOW, reminder.command());
         });
         sendAuthInstructions(player, operation);
     }

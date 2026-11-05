@@ -121,9 +121,7 @@ refactor/
 .trae/
 codacy.yaml
 .kiro/
-docs/*
-!docs/platforms.md
-!docs/audit-log.md
+docs/
 audyt/
 .windsurf
 analiza.md

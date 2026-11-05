@@ -190,12 +190,14 @@ final class QqDeviceApprovalService {
         }
     }
 
+    /** 直接取 core 队列里的全部待发通知（免密等纯通知走这里，不做二次中转）。 */
+    java.util.List<QqNotify> pollNotifications() {
+        return flow.pollNotifications();
+    }
+
+    /** 发起一次免密通知的入队（写入 core 的 DeviceApprovalFlow 队列）。 */
     void queueAutoLoginNotify(Player player, String remainingTime) {
         flow.notifyAutoLogin(VelocityAuthPlayer.of(player), remainingTime);
-        QqNotify notify;
-        while ((notify = flow.pollNotification()) != null) {
-            parent.enqueueNotification(notify);
-        }
     }
 
     QqResult stopAutoLogin(String platform, String groupId, String qqId, String stopId) {

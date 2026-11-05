@@ -44,7 +44,17 @@ public final class DeviceApprovalFlow {
     private final QqStopRequests stopRequests;
     private final String platformTag;
     private final Logger logger;
+    /** 待发通知上限：桥接长期不轮询时丢弃最旧的，避免无界增长。 */
+    private static final int MAX_PENDING_NOTIFICATIONS = 200;
+
     private final Queue<QqNotify> notifications = new ConcurrentLinkedQueue<>();
+
+    private void enqueueNotification(QqNotify notify) {
+        notifications.add(notify);
+        while (notifications.size() > MAX_PENDING_NOTIFICATIONS) {
+            notifications.poll();
+        }
+    }
 
     public DeviceApprovalFlow(QqSettings qqSettings, Settings coreSettings,
                               DatabaseManager databaseManager, Supplier<QqDao> daoSupplier,
@@ -117,7 +127,7 @@ public final class DeviceApprovalFlow {
                             fingerprint, now + ttlSeconds * 1000L);
             approvals.put(approval);
 
-            notifications.add(new QqNotify(qqId, approvalMessage(player, ttlSeconds),
+            enqueueNotification(new QqNotify(qqId, approvalMessage(player, ttlSeconds),
                     QqNotify.TYPE_DEVICE_APPROVAL, approvalId));
             logger.info(SECURITY_MARKER, "New-device QQ approval requested for {} (ttl={}s)",
                     player.username(), ttlSeconds);
@@ -149,6 +159,21 @@ public final class DeviceApprovalFlow {
 
     public QqNotify pollNotification() {
         return notifications.poll();
+    }
+
+    /**
+     * 一次性取走全部待发通知（桥接轮询用）。
+     *
+     * <p>设备确认那条仍可用 {@link #pollNotification()} 单条取出——它的调用方要拿
+     * approvalId 去排超时，属于「取出即用」，不适合批量。</p>
+     */
+    public java.util.List<QqNotify> pollNotifications() {
+        java.util.List<QqNotify> drained = new java.util.ArrayList<>();
+        QqNotify notify;
+        while ((notify = notifications.poll()) != null) {
+            drained.add(notify);
+        }
+        return drained;
     }
 
     public record DecisionOutcome(QqResult result,
@@ -220,7 +245,7 @@ public final class DeviceApprovalFlow {
                     + " 刚刚通过 Cookie 自动登录，免密剩余 " + remainingTime
                     + "。若非本人操作，请引用本条消息回复「阻止」撤销免密（"
                     + qqSettings.getDeviceApprovalTimeoutSeconds() + " 秒内有效）。";
-            notifications.add(new QqNotify(binding.get().getQqId(), message,
+            enqueueNotification(new QqNotify(binding.get().getQqId(), message,
                     QqNotify.TYPE_AUTO_LOGIN, stopId));
         } catch (SQLException | RuntimeException e) {
             logger.warn(SECURITY_MARKER, "Failed to queue auto-login notify for {}",
@@ -286,12 +311,9 @@ public final class DeviceApprovalFlow {
         String ip = player.address() == null ? "unknown"
                 : PlatformFingerprints.subnetLabel(player.address().getHostAddress());
         String client = player.clientBrand() + " / 版本 " + player.protocolVersion();
-        String message = "[YouShuiAuth] 账号 " + player.username() + " 新设备登录请求：" + client
+        return "[YouShuiAuth] 账号 " + player.username() + " 新设备登录请求：" + client
                 + " / IP 段 " + ip + "，有效期 " + ttlSeconds + " 秒。"
                 + "确认本人请引用本条消息回复 Y，拒绝回复 N。";
-        String joinUrl = qqSettings.getJoinUrl();
-        return joinUrl == null || joinUrl.isBlank() ? message
-                : message + "\n未入群请先加群：" + joinUrl;
     }
 
     private static Boolean parseDecision(String decision) {

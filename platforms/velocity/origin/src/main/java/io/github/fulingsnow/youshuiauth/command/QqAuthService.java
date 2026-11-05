@@ -324,9 +324,8 @@ public class QqAuthService implements QqAuthBridge, io.github.fulingsnow.youshui
     }
 
     /**
-     * Enqueues an auto-login notification for the bound QQ; the bot handles routing. The
-     * notification carries an opaque stopId so the owner can quote-reply {@code 阻止} to kick
-     * the session and revoke device trust.
+     * 为绑定 QQ 发起一次免密提醒（携带 opaque stopId，本人可引用回复「阻止」撤销）。
+     * 通知直接进 core 的队列，桥接轮询时由 pollNotifications() 统一取走。
      */
     public void queueAutoLoginNotify(Player player, String remainingTime) {
         deviceApprovalService.queueAutoLoginNotify(player, remainingTime);
@@ -349,6 +348,9 @@ public class QqAuthService implements QqAuthBridge, io.github.fulingsnow.youshui
     @Override
     public java.util.List<QqNotify> pollNotifications() {
         java.util.List<QqNotify> drained = new java.util.ArrayList<>();
+        if (deviceApprovalService != null) {
+            drained.addAll(deviceApprovalService.pollNotifications());
+        }
         QqNotify item;
         while ((item = pendingNotifications.pollFirst()) != null) {
             drained.add(item);

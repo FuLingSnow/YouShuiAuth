@@ -50,6 +50,13 @@ public final class QuarantineService implements Listener {
             io.github.fulingsnow.youshuiauth.runtime.AuthDeadlinePolicy
                     .REMINDER_INTERVAL_SECONDS * 5);
     private final Map<java.util.UUID, Long> chatNotices = new ConcurrentHashMap<>();
+    /**
+     * 该玩家是否已有账号。未登录提醒的文案与按钮依赖它：
+     * 已注册给 /login，未注册给 /register 或 /qqbind。
+     */
+    private final Map<java.util.UUID,
+            io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind> accountKinds =
+            new ConcurrentHashMap<>();
 
     /** 水平回拉容差（2.5 格）：位移在此范围内不重新传送，避免抖动。 */
     private static final double PULL_TOLERANCE = 2.5;
@@ -110,6 +117,7 @@ public final class QuarantineService implements Listener {
         quarantine(player);
 
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            accountKinds.put(player.getUniqueId(), resolveAccountKind(player));
             try {
                 if (runtime.autoLogin().attempt(PaperAuthPlayer.of(player)).authorized()) {
                     return;
@@ -120,11 +128,7 @@ public final class QuarantineService implements Listener {
             }
             plugin.getServer().getScheduler().runTask(plugin, () -> {
                 if (player.isOnline() && watchers.containsKey(player.getUniqueId())) {
-                    PaperAuthPlayer.of(player).sendMessage(io.github.fulingsnow.youshuiauth.i18n.ClientMessages.of(PaperAuthPlayer.of(player), runtime.settings(), runtime.messages(),
-                            io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy
-                                    .promptKey(runtime.settings().isPasswordRegistrationEnabled(),
-                                runtime.settings().getQqSettings().isEnabled()),
-                            NamedTextColor.YELLOW));
+                    PaperAuthPlayer.of(player).sendMessage(promptWithButton(player));
                     requestDeviceApproval(player);
                 }
             });
@@ -199,17 +203,57 @@ public final class QuarantineService implements Listener {
     /** 与 Velocity 的提醒形态一致：文案按账号状态选键，后接可点击的 /login 按钮。 */
     private net.kyori.adventure.text.Component promptWithButton(Player player) {
         var authPlayer = PaperAuthPlayer.of(player);
+        var reminder = io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.reminder(
+                accountKinds.getOrDefault(player.getUniqueId(),
+                        io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.UNKNOWN),
+                runtime.settings().isPasswordRegistrationEnabled(),
+                runtime.settings().getQqSettings().isEnabled());
         net.kyori.adventure.text.Component prompt =
                 io.github.fulingsnow.youshuiauth.i18n.ClientMessages.of(authPlayer,
-                        runtime.settings(), runtime.messages(),
-                        io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.promptKey(
-                                runtime.settings().isPasswordRegistrationEnabled(),
-                                runtime.settings().getQqSettings().isEnabled()),
+                        runtime.settings(), runtime.messages(), reminder.messageKey(),
                         net.kyori.adventure.text.format.NamedTextColor.YELLOW);
+        if (!reminder.hasButton()) {
+            return prompt;
+        }
         net.kyori.adventure.text.Component button = runtime.messages()
-                .component("auth.button.login", net.kyori.adventure.text.format.NamedTextColor.AQUA)
-                .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand("/login"));
+                .component(reminder.buttonKey(),
+                        net.kyori.adventure.text.format.NamedTextColor.AQUA)
+                .clickEvent(net.kyori.adventure.text.event.ClickEvent
+                        .runCommand(reminder.command()));
         return prompt.append(net.kyori.adventure.text.Component.space()).append(button);
+    }
+
+    /**
+     * 判断该玩家属于哪种账号：未注册 / 有密码 / 绑定了 QQ / 仅 QQ。
+     * 提醒的文案与按钮依赖它——已注册的 QQ 账号不能提示「用密码登录」。
+     */
+    private io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind
+            resolveAccountKind(Player player) {
+        var unknown = io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.UNKNOWN;
+        try {
+            var result = runtime.databaseManager().findPlayerByNickname(player.getName()).join();
+            if (result == null || result.isDatabaseError()) {
+                return unknown;
+            }
+            var account = result.getValue();
+            if (account == null) {
+                return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.NONE;
+            }
+            if (io.github.fulingsnow.youshuiauth.qq.QqAuthFlow.QQ_ONLY_HASH
+                    .equals(account.getHash())) {
+                return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.QQ_ONLY;
+            }
+            var dao = runtime.databaseManager().getQqDao();
+            if (dao != null && dao.findByUuid(io.github.fulingsnow.youshuiauth.platform.QqOps.PLATFORM_QQ,
+                    player.getUniqueId().toString()).isPresent()) {
+                return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.QQ_BOUND;
+            }
+            return io.github.fulingsnow.youshuiauth.runtime.AuthPromptPolicy.AccountKind.PASSWORD;
+        } catch (java.sql.SQLException | RuntimeException failure) {
+            plugin.getLogger().warning(runtime.messages().get(
+                    "quarantine.warn.autologin.failed", player.getName(), failure));
+            return unknown;
+        }
     }
 
     private void watch(Player player) {
@@ -376,6 +420,7 @@ public final class QuarantineService implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        accountKinds.remove(event.getPlayer().getUniqueId());
         io.github.fulingsnow.youshuiauth.paper.PaperMessageRelay.clear(
                 event.getPlayer().getUniqueId());
         PlatformScheduler.TaskHandle handle = watchers.remove(event.getPlayer().getUniqueId());
