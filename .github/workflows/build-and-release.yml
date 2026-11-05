@@ -61,13 +61,13 @@ jobs:
         run: |
           set -euo pipefail
           cd platforms/paper/paper-*/
-          ../../gradlew compileJava --no-daemon
+          ../../../gradlew compileJava --no-daemon
 
       - name: Compile Velocity
         run: |
           set -euo pipefail
           cd platforms/velocity/velocity-*/
-          ../../gradlew compileJava --no-daemon
+          ../../../gradlew compileJava --no-daemon
 
   # 打 tag 或手动触发：构建两个插件包
   package:
@@ -109,13 +109,13 @@ jobs:
         run: |
           set -euo pipefail
           cd platforms/paper/paper-*/
-          ../../gradlew build --no-daemon
+          ../../../gradlew build --no-daemon
 
       - name: Build Velocity
         run: |
           set -euo pipefail
           cd platforms/velocity/velocity-*/
-          ../../gradlew build --no-daemon
+          ../../../gradlew build --no-daemon
 
       - name: Collect jars
         run: |
